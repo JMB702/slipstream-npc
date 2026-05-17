@@ -29,6 +29,11 @@ const getCtx = (): AudioContext => {
   if (!ctx) {
     ctx = new (window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext)();
   }
+  // Autoplay policy: contexts not created during a user gesture start in
+  // `suspended` and must be resumed after a gesture. resume() returns a
+  // promise; on Chromium it resolves once a gesture has occurred. Cheap to
+  // call repeatedly — no-ops when already running. Mirrors sfx.ts.
+  if (ctx.state === 'suspended') void ctx.resume();
   return ctx;
 };
 
@@ -75,12 +80,29 @@ export const attachPeerStream = (peerId: string, stream: MediaStream | null): vo
   sink.autoplay = true;
   sink.style.display = 'none';
   document.body.appendChild(sink);
+  // Autoplay may be blocked until first user gesture — the pointer-lock
+  // click on the canvas usually clears it. Retry every 500ms until it
+  // sticks; otherwise the muted-<audio>-sink trick never pumps samples
+  // into Web Audio and the PannerNode outputs silence. Cleared once play
+  // succeeds or the slot is detached.
+  let playRetry: number | null = window.setInterval(() => {
+    if (!sink.paused) {
+      if (playRetry !== null) clearInterval(playRetry);
+      playRetry = null;
+      return;
+    }
+    void sink.play().catch(() => {
+      // Keep retrying silently — the gesture may not have happened yet.
+    });
+  }, 500);
   void sink.play().catch(() => {
-    // Autoplay may be blocked until first user gesture — the same gesture
-    // that started the AudioContext (pointer-lock) almost always covers it.
+    // First attempt may reject; the retry loop above handles it.
   });
 
   slots.set(peerId, { source, gain, panner, sink });
+  console.log(
+    `[audio-graph] attached peer ${peerId}; ctx.state=${audioCtx.state}, tracks=${stream.getAudioTracks().length}`,
+  );
 };
 
 // Set a peer's world position (their last known snapshot pos). Called each

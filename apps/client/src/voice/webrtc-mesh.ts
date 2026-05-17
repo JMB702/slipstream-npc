@@ -104,10 +104,12 @@ const createPeer = (peerId: string): Peer => {
   pc.ontrack = (ev) => {
     const stream = ev.streams[0] ?? new MediaStream([ev.track]);
     peer.remoteStream = stream;
+    console.log(`[mesh] ontrack from ${peerId}, kind=${ev.track.kind}`);
     emitTrack(peerId, stream);
   };
 
   pc.onconnectionstatechange = () => {
+    console.log(`[mesh] peer ${peerId} connectionState=${pc.connectionState}`);
     // Hard-failed peer: drop and let the next snapshot diff re-add it. Browser
     // doesn't recover from "failed" without manual restartIce; cheaper to
     // tear down and remake.
@@ -116,7 +118,12 @@ const createPeer = (peerId: string): Peer => {
     }
   };
 
+  pc.oniceconnectionstatechange = () => {
+    console.log(`[mesh] peer ${peerId} iceConnectionState=${pc.iceConnectionState}`);
+  };
+
   peers.set(peerId, peer);
+  console.log(`[mesh] created peer ${peerId} (polite=${polite})`);
   return peer;
 };
 
