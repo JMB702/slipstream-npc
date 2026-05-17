@@ -20,10 +20,10 @@ import {
   type AnimationAction,
 } from 'three';
 import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
-import { PLAYER, type CharacterId, type PlayerId, type Vec3 } from '@slipstream-npc/shared';
+import { COFFEE_WORLD_POSITION, PLAYER, POSE, type CharacterId, type PlayerId, type Pose, type PoseTransition, type Vec3 } from '@slipstream-npc/shared';
 import { useGame } from '../store.js';
-import { getCameraDist } from './local-state.js';
-import { playGunshot, playHitMarker, playReload } from './sfx.js';
+import { getCameraDist, startDrinkLock } from './local-state.js';
+import { playCoffeeSip, playGunshot, playHitMarker, playReload } from './sfx.js';
 
 // =============================================================================
 // Mixamo rifle-aim character swap workflow
@@ -60,11 +60,37 @@ import { playGunshot, playHitMarker, playReload } from './sfx.js';
 //     a Fire clip yet)
 // =============================================================================
 
+// Cache-bust version. Bump ONLY when the GLBs are rebaked (pnpm bake:characters)
+// — drei keys its in-memory parse cache by URL, so a stale tab keeps the old
+// clip data even after the file on disk changes. Don't tie this to Date.now()
+// (gotcha #9 — forces re-downloads on every reload for every player).
+const GLB_VERSION = '3';
+const url = (path: string) => `${path}?v=${GLB_VERSION}`;
 const MODEL_URLS: Record<CharacterId, string> = {
-  soldier: '/models/Soldier.glb',
-  ch35: '/models/Ch35.glb',
+  soldier: url('/models/Soldier.glb'),
+  ch15: url('/models/Ch15.glb'),
+  ch35: url('/models/Ch35.glb'),
+  eve: url('/models/Eve.glb'),
+  maria: url('/models/Maria.glb'),
+  medea: url('/models/Medea.glb'),
+  // Guts's new body (5/16). Baked from 3D Assets/Characters/Guts - Dreyar By M.Aure.fbx
+  // via the same `pnpm bake:characters Dreyar` pipeline.
+  dreyar: url('/models/Dreyar.glb'),
 };
-for (const url of Object.values(MODEL_URLS)) useGLTF.preload(url);
+for (const u of Object.values(MODEL_URLS)) useGLTF.preload(u);
+
+const MODEL_SCALES: Record<CharacterId, number> = {
+  soldier: 1,
+  ch15: 1,
+  ch35: 1,
+  eve: 1,
+  maria: 1,
+  medea: 1,
+  // Dreyar's baked asset is ~17.25m tall while the shared player capsule is
+  // 1.8m. Scale only the visual model so Guts matches the other characters
+  // without changing movement, hit detection, or the attached rifle size.
+  dreyar: 0.10436,
+};
 
 interface Props {
   velocity: Vec3;
@@ -74,6 +100,12 @@ interface Props {
   alive: boolean;
   playerId: PlayerId | null;
   characterId?: CharacterId;
+  // Server-driven expressive pose. null = combat-ready (existing locomotion runs).
+  // poseTransition !== null means a one-shot is currently playing; once the
+  // server clears it, the looping clip for `pose` takes over.
+  pose?: Pose;
+  poseTransition?: PoseTransition;
+  danceVariant?: number;
 }
 
 const WALK_RUN_THRESHOLD = (PLAYER.walkSpeed + PLAYER.sprintSpeed) / 2;
@@ -89,6 +121,16 @@ const JUMP_POSE_TIME = 0.35;
 // this slightly less so the next shot can re-trigger smoothly.
 const FIRE_HOLD_MS = 350;
 
+// Drink sequence timings. First an ALIGN_MS window where the character
+// turns to face the maker (no animation switch, just a yaw lerp under the
+// existing CasualIdle pose). Then PickUpCoffee plays for its full native
+// duration, then DrinkCoffee. Track the actual Mixamo clip lengths
+// (PickUp = 3.467s, Drinking = 8.900s) plus a small buffer so the final
+// pose holds briefly before the state machine releases control.
+const ALIGN_MS = 400;
+const PICKUP_HOLD_MS = 3500;
+const DRINK_HOLD_MS = 9000;
+
 // When the camera-to-eye distance drops below this, hide the local skeletal
 // mesh so the character's head/torso doesn't occlude the aim cone. Picked
 // just above ADS framing (1.6m) so ADS reliably triggers the hide; spring-arm
@@ -100,6 +142,7 @@ const LOCAL_HIDE_DIST = 1.9;
 const MUZZLE_FLASH_MS = 55;
 
 type Dir = 'F' | 'FR' | 'R' | 'BR' | 'B' | 'BL' | 'L' | 'FL';
+type DanceKey = 'DanceHipHop' | 'DanceSalsa' | 'DanceSilly';
 type ClipKey =
   | 'Idle'
   | 'Jump'
@@ -110,8 +153,24 @@ type ClipKey =
   | 'Reload'
   | 'ReloadWalk'
   | 'ReloadRun'
+  | 'CasualIdle'
+  | 'CasualWalkF'
+  | 'CasualRunF'
+  | 'LeanWall'
+  | 'SitDown'
+  | 'SitIdle'
+  | 'LayDown'
+  | 'LayIdle'
+  | 'StandUp'
+  | 'PickUpCoffee'
+  | 'DrinkCoffee'
+  | DanceKey
   | `Walk${Dir}`
   | `Run${Dir}`;
+
+// Danced clip variants, ordered to match POSE.danceVariants (server clamps
+// the wire value to [0, POSE.danceVariants - 1] before broadcasting).
+const DANCE_VARIANTS: readonly DanceKey[] = ['DanceHipHop', 'DanceSalsa', 'DanceSilly'];
 
 // Map ClipKey -> the actual clip name in the GLB. `null` means "no clip
 // available, skip transitions to this state".
@@ -125,6 +184,29 @@ const CLIP_NAMES: Record<ClipKey, string | null> = {
   Reload: 'Reload',
   ReloadWalk: 'ReloadWalk',
   ReloadRun: 'ReloadRun',
+  // Social poses. null until the corresponding clip is baked into the GLB
+  // (see scripts/canonical-clip-map.json). The state machine gracefully
+  // falls back to Idle / WalkF when a posed clip resolves to null.
+  CasualIdle: 'CasualIdle',
+  CasualWalkF: 'CasualWalkF',
+  CasualRunF: 'CasualRunF',
+  LeanWall: 'LeanWall',
+  SitDown: 'SitDown',
+  SitIdle: 'SitIdle',
+  LayDown: 'LayDown',
+  LayIdle: 'LayIdle',
+  StandUp: 'StandUp',
+  // Free-coffee interaction sequence. Bake via `pnpm bake-character-glb` —
+  // the canonical clip names produced by the bake pipeline are 'PickUp' and
+  // 'Drinking' (see scripts/canonical-clip-map.json). Until the character
+  // GLBs are rebaked these resolve to no AnimationAction and the state
+  // machine falls back to Idle/WalkF — the server still applies the buff and
+  // emits the DrinkEvent, but the player won't see a custom animation yet.
+  PickUpCoffee: 'PickUp',
+  DrinkCoffee: 'Drinking',
+  DanceHipHop: 'DanceHipHop',
+  DanceSalsa: 'DanceSalsa',
+  DanceSilly: 'DanceSilly',
   WalkF: 'WalkF',
   WalkFR: 'WalkFR',
   WalkR: 'WalkR',
@@ -164,6 +246,10 @@ const CLIP_TIMESCALE: Record<ClipKey, number> = {
   Reload: 1,
   ReloadWalk: 1,
   ReloadRun: 1,
+  CasualIdle: 1, CasualWalkF: 2, CasualRunF: 1, LeanWall: 1,
+  SitDown: 1, SitIdle: 1, LayDown: 1, LayIdle: 1, StandUp: 1,
+  PickUpCoffee: 1, DrinkCoffee: 1,
+  DanceHipHop: 1, DanceSalsa: 1, DanceSilly: 1,
   WalkF: 2, WalkFR: 2, WalkR: 2, WalkBR: 2, WalkB: 2, WalkBL: 2, WalkL: 2, WalkFL: 2,
   RunF: 1, RunFR: 1, RunR: 1, RunBR: 1, RunB: 1, RunBL: 1, RunL: 1, RunFL: 1,
 };
@@ -177,8 +263,20 @@ const directionFromVelocity = (lf: number, lr: number): Dir => {
   return DIRS_BY_OCTANT[idx]!;
 };
 
-export const Character = ({ velocity, yaw, reloading, vaulting, alive, playerId, characterId = 'soldier' }: Props) => {
+export const Character = ({
+  velocity,
+  yaw,
+  reloading,
+  vaulting,
+  alive,
+  playerId,
+  characterId = 'soldier',
+  pose = null,
+  poseTransition = null,
+  danceVariant = 0,
+}: Props) => {
   const gltf = useGLTF(MODEL_URLS[characterId] ?? MODEL_URLS.soldier);
+  const modelScale = MODEL_SCALES[characterId] ?? 1;
   const cloned = useMemo(() => SkeletonUtils.clone(gltf.scene), [gltf.scene]);
   // Mixamo animations carry root motion in the Hips bone's position track —
   // the character translates forward during Walk/Run, jumps in Y during a
@@ -188,11 +286,27 @@ export const Character = ({ velocity, yaw, reloading, vaulting, alive, playerId,
   const animations = useMemo(() => stripRootMotion(gltf.animations), [gltf.animations]);
   const { actions } = useAnimations(animations, cloned);
   const currentAnim = useRef<ClipKey>('Idle');
+  // Tracks the most recent drinkSession value the state machine has reacted
+  // to. When the live drinkSession outpaces this ref, the state machine
+  // bypasses its `currentAnim === wanted` short-circuit so the second drink
+  // (and beyond) always fires a fresh transition.
+  const lastDrinkSessionRef = useRef(0);
 
   // Fire state: true while we want to be playing the Fire clip. Cleared by
   // a timer FIRE_HOLD_MS after the most recent shot event for this player.
   const [firing, setFiring] = useState(false);
   const fireTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Drink sequence: 'pickup' → 'drink' → null over PICKUP_HOLD_MS +
+  // DRINK_HOLD_MS. Driven by the server-event subscriber below — same
+  // timestamp-gating pattern (gotcha #14) the shot/hit-marker uses so the
+  // 200-event ring buffer can't deafen us. `drinkSession` increments per
+  // drink event so the state machine effect always re-runs on a fresh
+  // drink even if React would short-circuit a same-value setState.
+  const [drinkPhase, setDrinkPhase] = useState<null | 'pickup' | 'drink'>(null);
+  const [drinkSession, setDrinkSession] = useState(0);
+  const drinkAlignTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const drinkPickupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const drinkEndTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Timestamp-based detection. Length-based comparison silently breaks once
   // the store's 200-event cap fills: array length stays pinned and the
   // subscriber stops firing, killing muzzle flash + Fire animation triggers
@@ -209,6 +323,8 @@ export const Character = ({ velocity, yaw, reloading, vaulting, alive, playerId,
       let firedThisBatch = false;
       let lastShotOrigin: Vec3 | null = null;
       let hitThisBatch = false;
+      let drankThisBatch = false;
+      let drinkPosition: Vec3 | null = null;
       let maxAt = lastAtRef.current;
       const myId = state.myId;
       for (const ev of state.events) {
@@ -219,20 +335,103 @@ export const Character = ({ velocity, yaw, reloading, vaulting, alive, playerId,
           lastShotOrigin = ev.origin;
           if (playerId === myId && ev.hit) hitThisBatch = true;
         }
+        if (ev.type === 'drink' && ev.playerId === playerId) {
+          drankThisBatch = true;
+          const snap = state.snapshots[state.snapshots.length - 1];
+          drinkPosition = snap?.players.get(playerId)?.position ?? null;
+        }
       }
       lastAtRef.current = maxAt;
-      if (!firedThisBatch) return;
-      if (lastShotOrigin) {
-        const dx = camera.position.x - lastShotOrigin[0];
-        const dy = camera.position.y - lastShotOrigin[1];
-        const dz = camera.position.z - lastShotOrigin[2];
-        playGunshot(Math.sqrt(dx * dx + dy * dy + dz * dz));
+      if (firedThisBatch) {
+        if (lastShotOrigin) {
+          const dx = camera.position.x - lastShotOrigin[0];
+          const dy = camera.position.y - lastShotOrigin[1];
+          const dz = camera.position.z - lastShotOrigin[2];
+          playGunshot(Math.sqrt(dx * dx + dy * dy + dz * dz));
+        }
+        if (hitThisBatch) playHitMarker();
+        setFiring(true);
+        muzzleFlashUntilRef.current = performance.now() + MUZZLE_FLASH_MS;
+        if (fireTimeoutRef.current) clearTimeout(fireTimeoutRef.current);
+        fireTimeoutRef.current = setTimeout(() => setFiring(false), FIRE_HOLD_MS);
       }
-      if (hitThisBatch) playHitMarker();
-      setFiring(true);
-      muzzleFlashUntilRef.current = performance.now() + MUZZLE_FLASH_MS;
-      if (fireTimeoutRef.current) clearTimeout(fireTimeoutRef.current);
-      fireTimeoutRef.current = setTimeout(() => setFiring(false), FIRE_HOLD_MS);
+      if (drankThisBatch) {
+        if (drinkPosition) {
+          const dx = camera.position.x - drinkPosition[0];
+          const dy = camera.position.y - drinkPosition[1];
+          const dz = camera.position.z - drinkPosition[2];
+          playCoffeeSip(Math.sqrt(dx * dx + dy * dy + dz * dz));
+        }
+        // Three.js auto-disables actions after a fadeOut completes (gotcha #3).
+        // After the first drink's animations have faded out into CasualIdle,
+        // the PickUp / Drinking actions are sitting disabled — a subsequent
+        // fadeIn().play() would blend the bind pose through. Pre-emptively
+        // reset+enable both clips and zero their weight so the state machine
+        // transition that's about to fire lands on a clean foundation.
+        const pickupAction = CLIP_NAMES.PickUpCoffee
+          ? actions[CLIP_NAMES.PickUpCoffee]
+          : null;
+        const drinkAction = CLIP_NAMES.DrinkCoffee
+          ? actions[CLIP_NAMES.DrinkCoffee]
+          : null;
+        if (pickupAction) {
+          pickupAction.stop();
+          pickupAction.reset();
+          pickupAction.enabled = true;
+        }
+        if (drinkAction) {
+          drinkAction.stop();
+          drinkAction.reset();
+          drinkAction.enabled = true;
+        }
+        // Stay in the resting pose (CasualIdle) during the alignment
+        // window — drinkPhase doesn't enter 'pickup' until the character
+        // has finished turning to face the maker. setDrinkSession still
+        // increments so the state machine effect re-runs and the locked
+        // yaw is visibly updated each frame via getDrinkLockedYaw().
+        setDrinkSession((s) => s + 1);
+        if (drinkAlignTimerRef.current) clearTimeout(drinkAlignTimerRef.current);
+        if (drinkPickupTimerRef.current) clearTimeout(drinkPickupTimerRef.current);
+        if (drinkEndTimerRef.current) clearTimeout(drinkEndTimerRef.current);
+        drinkAlignTimerRef.current = setTimeout(() => setDrinkPhase('pickup'), ALIGN_MS);
+        drinkPickupTimerRef.current = setTimeout(
+          () => setDrinkPhase('drink'),
+          ALIGN_MS + PICKUP_HOLD_MS,
+        );
+        drinkEndTimerRef.current = setTimeout(
+          () => setDrinkPhase(null),
+          ALIGN_MS + PICKUP_HOLD_MS + DRINK_HOLD_MS,
+        );
+        // Local-player only: lock the rendered yaw for the duration. The
+        // first ALIGN_MS lerps from the player's current yaw to the
+        // "facing the maker" target so the character visibly turns into
+        // position before the pickup animation plays. After that, yaw
+        // holds at the target while the camera (still mouse-driven) can
+        // free-orbit around the stationary character.
+        const myIdNow = state.myId;
+        if (playerId === myIdNow) {
+          const snap = state.snapshots[state.snapshots.length - 1];
+          const me = snap?.players.get(playerId);
+          const startYaw = me?.yaw ?? 0;
+          // Yaw convention (see sim.ts applyMovement): the player's forward
+          // direction at yaw=0 is (0, 0, -1); rotating yaw rotates around +Y.
+          // To face the maker from the player's position, compute the
+          // ground-plane vector and solve for the yaw that aligns forward
+          // with it: atan2(player.x - maker.x, player.z - maker.z).
+          const px = me?.position[0] ?? 0;
+          const pz = me?.position[2] ?? 0;
+          const targetYaw = Math.atan2(
+            px - COFFEE_WORLD_POSITION[0],
+            pz - COFFEE_WORLD_POSITION[2],
+          );
+          startDrinkLock(
+            ALIGN_MS + PICKUP_HOLD_MS + DRINK_HOLD_MS,
+            startYaw,
+            targetYaw,
+            ALIGN_MS,
+          );
+        }
+      }
     });
   }, [playerId, camera]);
 
@@ -296,6 +495,14 @@ export const Character = ({ velocity, yaw, reloading, vaulting, alive, playerId,
     const gun = gunMeshRef.current;
     const bone = handBoneRef.current;
     if (!wrapper || !gun || !bone) return;
+    // Gun is only visible in combat stance. Casual, lean, sit, lay, dance
+    // and any pose transition (including stand_up back to null) hide it so
+    // the relaxed clips don't show a rifle dangling from a hand that isn't
+    // gripping it. Firing while casual auto-clears pose server-side, so the
+    // gun reappears in time for the muzzle flash.
+    const gunVisible = pose === null && poseTransition === null;
+    gun.visible = gunVisible;
+    if (!gunVisible) return;
     // Get the bone's world position, convert to wrapper-local. We skip
     // rotation tracking on purpose — Mixamo's bone world matrix bakes a
     // ~0.001 cumulative scale that contaminates rotation extraction.
@@ -341,10 +548,44 @@ export const Character = ({ velocity, yaw, reloading, vaulting, alive, playerId,
     const reloadRunClip = CLIP_NAMES.ReloadRun ? actions[CLIP_NAMES.ReloadRun] : undefined;
     const vaultClip = CLIP_NAMES.Vault ? actions[CLIP_NAMES.Vault] : undefined;
     const deathClip = CLIP_NAMES.Death ? actions[CLIP_NAMES.Death] : undefined;
+    const pickupCoffeeClip = CLIP_NAMES.PickUpCoffee ? actions[CLIP_NAMES.PickUpCoffee] : undefined;
+    const drinkCoffeeClip = CLIP_NAMES.DrinkCoffee ? actions[CLIP_NAMES.DrinkCoffee] : undefined;
 
-    // Priority: Death > Vault > Reload > Fire > Jump (airborne) > locomotion.
+    // Pose lookup — only consulted if the server says we're posed. Falls back
+    // to null if the clip isn't in the GLB yet (clips ship gradually).
+    const poseTransitionKey: ClipKey | null =
+      poseTransition === 'sit_down' ? 'SitDown'
+      : poseTransition === 'lay_down' ? 'LayDown'
+      : poseTransition === 'stand_up' ? 'StandUp'
+      : null;
+    // Casual mode is the only pose with multiple locomotion clips: Idle when
+    // still, CasualWalkF at walk speed, CasualRunF when sprinting. Sprint
+    // boundary matches the combat state machine (WALK_RUN_THRESHOLD = midway
+    // between walkSpeed and sprintSpeed). When airborne, we return null so
+    // the predicate falls through to the Jump path below — otherwise the
+    // character would freeze CasualIdle in midair. Only forward locomotion
+    // variants ship today (slight foot-slide sideways/back is acceptable;
+    // an 8-way casual pack is a follow-up).
+    const poseHoldKey: ClipKey | null =
+      pose === 'casual_idle'
+        ? (airborne
+          ? null
+          : speed >= WALK_RUN_THRESHOLD ? 'CasualRunF'
+          : speed >= IDLE_SPEED ? 'CasualWalkF'
+          : 'CasualIdle')
+      : pose === 'lean_wall' ? 'LeanWall'
+      : pose === 'sit' ? 'SitIdle'
+      : pose === 'lay' ? 'LayIdle'
+      : pose === 'dance' ? (DANCE_VARIANTS[Math.max(0, Math.min(POSE.danceVariants - 1, danceVariant))] ?? null)
+      : null;
+    const poseTransitionClip = poseTransitionKey ? actions[CLIP_NAMES[poseTransitionKey] ?? ''] : undefined;
+    const poseHoldClip = poseHoldKey ? actions[CLIP_NAMES[poseHoldKey] ?? ''] : undefined;
+
+    // Priority: Death > PoseTransition > PoseHold > Vault > Reload > Fire > Jump (airborne) > locomotion.
     // Death wins over everything — once the player is killed, every other
     // animation is overridden until they respawn.
+    // Pose comes next: if the server says we're posed, we play the pose clip
+    // and ignore locomotion (the server already zeroed velocity).
     let desired: ClipKey;
     if (!alive && deathClip) {
       desired = 'Death';
@@ -352,6 +593,20 @@ export const Character = ({ velocity, yaw, reloading, vaulting, alive, playerId,
       // No Death clip in the GLB — fade everything out (legacy behavior).
       for (const a of Object.values(actions)) a?.fadeOut(0.2);
       return;
+    } else if (drinkPhase === 'pickup' && pickupCoffeeClip && !airborne) {
+      // Drink outranks pose / locomotion. The local player spawns in
+      // pose='casual_idle' (peaceful default), and that pose's hold clip
+      // would otherwise silently win the priority race below — the drink
+      // anim never showed. Keep drink above pose so the 3-second pickup→
+      // drink cinematic plays regardless of resting pose. Combat (fire,
+      // reload, death) still wins because those branches sit above this.
+      desired = 'PickUpCoffee';
+    } else if (drinkPhase === 'drink' && drinkCoffeeClip && !airborne) {
+      desired = 'DrinkCoffee';
+    } else if (poseTransitionKey && poseTransitionClip) {
+      desired = poseTransitionKey;
+    } else if (poseHoldKey && poseHoldClip) {
+      desired = poseHoldKey;
     } else if (vaulting && vaultClip) {
       desired = 'Vault';
     } else if (reloading && !airborne && speed >= WALK_RUN_THRESHOLD && reloadRunClip) {
@@ -382,13 +637,19 @@ export const Character = ({ velocity, yaw, reloading, vaulting, alive, playerId,
           ? pickAction(actions, 'WalkF') ? 'WalkF' : 'Idle'
           : pickAction(actions, 'RunF') ? 'RunF' : 'Idle';
 
-    if (currentAnim.current === wanted) return;
+    // Fresh drink event detection. If a new drink session started since our
+    // last evaluation, force a transition even if `wanted` matches the
+    // currently playing clip — the action may have been disabled by an
+    // earlier fadeOut (Three gotcha #3) and needs a full reset cycle.
+    const drinkSessionAdvanced = drinkSession !== lastDrinkSessionRef.current;
+    lastDrinkSessionRef.current = drinkSession;
+    if (currentAnim.current === wanted && !drinkSessionAdvanced) return;
 
     const prev = pickAction(actions, currentAnim.current);
     const next = pickAction(actions, wanted);
     const sameClip = prev === next;
 
-    if (sameClip && next) {
+    if (sameClip && next && !drinkSessionAdvanced) {
       applyClipMode(next, wanted, false);
       next.play();
       currentAnim.current = wanted;
@@ -401,7 +662,7 @@ export const Character = ({ velocity, yaw, reloading, vaulting, alive, playerId,
       next.fadeIn(0.15).play();
     }
     currentAnim.current = wanted;
-  }, [velocity, yaw, reloading, vaulting, alive, firing, actions]);
+  }, [velocity, yaw, reloading, vaulting, alive, firing, drinkPhase, drinkSession, actions, pose, poseTransition, danceVariant]);
 
   // Note: deliberately NOT returning null when !alive — we want the corpse
   // to remain visible playing the Death clip until the server respawns the
@@ -416,7 +677,9 @@ export const Character = ({ velocity, yaw, reloading, vaulting, alive, playerId,
   // makes bone-attached children invisible.
   return (
     <group ref={wrapperRef} position={[0, -PLAYER.height / 2, 0]} rotation={[0, Math.PI, 0]}>
-      <primitive object={cloned} />
+      <group scale={modelScale}>
+        <primitive object={cloned} />
+      </group>
       <CharacterGun gunMeshRef={gunMeshRef} />
     </group>
   );
@@ -471,18 +734,30 @@ const applyClipMode = (
 
   action.paused = false;
   action.timeScale = CLIP_TIMESCALE[mode] ?? 1;
-  if (freshClip && (mode === 'Fire' || mode === 'Reload' || mode === 'ReloadWalk' || mode === 'ReloadRun' || mode === 'Death')) {
-    // Restart these clips from the beginning so each shot/reload/death replays cleanly.
+  if (freshClip && (mode === 'Fire' || mode === 'Reload' || mode === 'ReloadWalk' || mode === 'ReloadRun' || mode === 'Death' || mode === 'PickUpCoffee' || mode === 'DrinkCoffee')) {
+    // Restart these clips from the beginning so each shot/reload/death/drink replays cleanly.
+    action.time = 0;
+  }
+  if (freshClip && (mode === 'SitDown' || mode === 'LayDown' || mode === 'StandUp')) {
+    // Pose transitions are one-shot — restart from frame 0 each time so a
+    // mid-pose change doesn't pick up from a stale playhead.
     action.time = 0;
   }
   if (freshClip && mode === 'Vault') {
     // Skip the approach-run portion at the start of the Mixamo clip.
     action.time = VAULT_START_TIME;
   }
-  // Vault and Death are one-shot — looping would restart the leap mid-air or
-  // the death mid-fall. Hold the final pose at the end (clampWhenFinished)
-  // until the server clears the state (vault completes / player respawns).
-  if (mode === 'Vault' || mode === 'Death') {
+  // One-shots hold their final frame until the server flips state. Vault /
+  // Death are existing; pose transitions (SitDown/LayDown/StandUp) follow the
+  // same contract — the server-side advancePoseTransition timer is what flips
+  // the visual into the looped destination pose.
+  if (
+    mode === 'Vault' ||
+    mode === 'Death' ||
+    mode === 'SitDown' ||
+    mode === 'LayDown' ||
+    mode === 'StandUp'
+  ) {
     action.loop = LoopOnce;
     action.clampWhenFinished = true;
   } else {

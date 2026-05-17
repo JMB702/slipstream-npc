@@ -4,6 +4,7 @@ import { PerspectiveCamera } from 'three';
 import { PLAYER, raycastObstacles, type Vec3 } from '@slipstream-npc/shared';
 import { useGame } from '../store.js';
 import { getActiveInput, getPredictedState, setCameraDist } from './local-state.js';
+import { setListenerPose } from '../voice/player-audio-graph.js';
 
 // Hipfire (default) framing.
 const HIP_BACK_DIST = 3.4;
@@ -156,6 +157,11 @@ export const FollowCamera = () => {
     // Publish the applied camera distance so the local Character can hide its
     // body when the camera is close enough that the head occludes the aim cone.
     setCameraDist(appliedDist.current);
+
+    // Drive the spatial audio listener from the same pose. Forward is the
+    // camera's look vector (fx, fy, fz); position is the applied camera
+    // position. HRTF panning for remote player voice keys off these values.
+    setListenerPose([camX, camY, camZ], [fx, fy, fz]);
   });
 
   return null;

@@ -1,16 +1,21 @@
 import {
+  COFFEE,
   MAP,
   NET,
   PLAYER,
+  POSE,
   TICK_MS,
   VAULT,
   WEAPON,
   WINDOWS,
   applyMovement,
+  horizontalDistanceToCoffee,
   rayCapsuleVertical,
   raycastObstacles,
   type GameEvent,
   type InputFrame,
+  type Pose,
+  type PoseTransition,
   type Vec3,
   type WindowDef,
 } from '@slipstream-npc/shared';
@@ -18,9 +23,112 @@ import type { ServerPlayer } from './state.js';
 import { randomSpawn } from './state.js';
 import { markAttack } from './social.js';
 
+const POSE_TRANSITION_MS: Record<NonNullable<PoseTransition>, number> = {
+  sit_down: POSE.sitDownMs,
+  lay_down: POSE.layDownMs,
+  stand_up: POSE.standUpMs,
+};
+
+// Server-side helper to drive a player's pose. Used by the local-player
+// set_pose ClientMessage path and the /tools/set_pose webhook for voice
+// agents. Sets the transition (if any) and destination pose atomically;
+// the simulation tick flips transition → null after the timing elapses.
+export const setPose = (
+  player: ServerPlayer,
+  pose: Pose,
+  transition: PoseTransition,
+  danceVariant: number,
+  now: number,
+): void => {
+  player.pose = pose;
+  player.poseTransition = transition;
+  player.danceVariant = Math.max(0, Math.floor(danceVariant)) % POSE.danceVariants;
+  player.poseStartedAt = now;
+  if (transition !== null) {
+    player.velocity = [0, 0, 0];
+  }
+};
+
+// Combat overrides social. Called from the hit path so a posed NPC drops
+// the pose the moment someone shoots them.
+export const clearPose = (player: ServerPlayer): void => {
+  player.pose = null;
+  player.poseTransition = null;
+  player.danceVariant = 0;
+  player.poseStartedAt = undefined;
+};
+
+// Advance pose-transition timers. Called once per tick from runTick.
+export const advancePoseTransition = (player: ServerPlayer, now: number): void => {
+  if (player.poseTransition === null) return;
+  const startedAt = player.poseStartedAt ?? now;
+  const elapsed = now - startedAt;
+  const required = POSE_TRANSITION_MS[player.poseTransition];
+  if (elapsed < required) return;
+  // Transition complete. For sit_down / lay_down the destination pose is
+  // already in `player.pose`. For stand_up we always return to default null.
+  if (player.poseTransition === 'stand_up') {
+    player.pose = null;
+  }
+  player.poseTransition = null;
+  player.poseStartedAt = now;
+};
+
+// Voice-agent-facing API: pick the right transition for a target pose so the
+// agent only has to say "sit" rather than "play sit_down for 1.5s then sit".
+// `target` mirrors the agent webhook contract — null means "back to default."
+export const applyAgentPose = (
+  player: ServerPlayer,
+  target: Pose,
+  danceVariant: number,
+  now: number,
+): void => {
+  // Standing up from a held pose plays the stand_up transition first.
+  if (target === null) {
+    if (player.pose === 'sit' || player.pose === 'lay') {
+      setPose(player, null, 'stand_up', 0, now);
+    } else {
+      clearPose(player);
+    }
+    return;
+  }
+  if (target === 'sit') {
+    setPose(player, 'sit', 'sit_down', 0, now);
+    return;
+  }
+  if (target === 'lay') {
+    setPose(player, 'lay', 'lay_down', 0, now);
+    return;
+  }
+  // casual_idle, lean_wall, dance — no transition (the destination loop just starts).
+  setPose(player, target, null, danceVariant, now);
+};
+
 export const applyInput = (player: ServerPlayer, input: InputFrame, now: number): void => {
   if (!player.alive) {
     player.lastSeenSeq = input.seq;
+    return;
+  }
+  // Firing engages combat from any non-combat state — clears casual_idle,
+  // breaks committed social poses, and abandons in-progress transitions so
+  // the rifle-aim state machine takes over instantly. Done before computing
+  // freeze flags so a same-frame fire from a posed state doesn't stall input.
+  if (input.fire && player.pose !== null) {
+    clearPose(player);
+  }
+  // Casual mode is the default walking state — the player moves normally,
+  // just with relaxed animations instead of rifle aim. Only the *committed*
+  // social poses (sit, lay, lean, dance) and their transitions freeze input.
+  const isCommittedPose =
+    player.pose !== null && player.pose !== 'casual_idle';
+  const isInTransition = player.poseTransition !== null;
+  // Committed pose / mid-transition: freeze position, only update look.
+  if (isCommittedPose || isInTransition) {
+    player.yaw = input.yaw;
+    player.pitch = input.pitch;
+    player.velocity = [0, 0, 0];
+    player.lastSeenSeq = input.seq;
+    player.lastIntegratedAt = now;
     return;
   }
   // Vaulting: server-driven tween owns position; just keep yaw/pitch fresh
@@ -29,6 +137,20 @@ export const applyInput = (player: ServerPlayer, input: InputFrame, now: number)
     player.yaw = input.yaw;
     player.pitch = input.pitch;
     player.lastSeenSeq = input.seq;
+    return;
+  }
+  // Drink lock: while the coffee animation is playing, the body is frozen
+  // in place so the pickup→drink clip doesn't slide. Yaw/pitch still update
+  // so the camera (free-orbiting around the locked character) can be
+  // mouse-driven. Velocity zeroed every tick so any pre-drink momentum
+  // dies immediately. Lock duration matches the client's animation window
+  // (COFFEE.drinkLockMs).
+  if (player.drinkingUntil !== undefined && Date.now() < player.drinkingUntil) {
+    player.yaw = input.yaw;
+    player.pitch = input.pitch;
+    player.velocity = [0, 0, 0];
+    player.lastSeenSeq = input.seq;
+    player.lastIntegratedAt = now;
     return;
   }
   // Edge-trigger: if jump was pressed AND we're standing near a window we
@@ -63,6 +185,49 @@ export const applyInput = (player: ServerPlayer, input: InputFrame, now: number)
     player.reloading = true;
     player.reloadDoneAt = now + WEAPON.reloadMs;
   }
+};
+
+// Server-authoritative coffee-drink check. Returns a DrinkEvent when
+// proximity passes. Pure decision — caller broadcasts the event and handles
+// NPC-alert side effects (synchronous applyInput stays async-free).
+export interface DrinkResult {
+  event: GameEvent;
+}
+
+export const tryDrinkCoffee = (
+  player: ServerPlayer,
+  now: number,
+): DrinkResult | null => {
+  if (!player.alive) return null;
+  if (player.reloading || player.vaultEndAt !== null) return null;
+  if (COFFEE.cooldownMs > 0 && player.lastCoffeeDrinkAt !== undefined) {
+    const sinceMs = Date.now() - player.lastCoffeeDrinkAt;
+    if (sinceMs < COFFEE.cooldownMs) return null;
+  }
+  if (horizontalDistanceToCoffee(player.position) > COFFEE.interactRadius) return null;
+
+  player.health = Math.min(PLAYER.maxHealth, player.health + COFFEE.healAmount);
+  player.coffeeBuffUntil = Date.now() + COFFEE.buffDurationMs;
+  player.lastCoffeeDrinkAt = Date.now();
+  // Movement lock for the full animation window (align + pickup + drink).
+  // applyInput zeroes velocity and skips applyMovement until this elapses,
+  // so the player can't slide around mid-sip.
+  player.drinkingUntil = Date.now() + COFFEE.drinkLockMs;
+  // Drinking is a non-combat moment — drop combat aim back into casual stance
+  // for the duration of the animation so the pickup→drink clip reads cleanly
+  // AND the held rifle disappears (Character.tsx gates gun visibility on
+  // `pose === null`, so combat-mode drinkers would otherwise sip with the
+  // rifle still in hand). Done unconditionally: every drink ends up in
+  // casual_idle, regardless of whether the player was in combat, sitting,
+  // leaning, or dancing.
+  if (player.pose !== 'casual_idle' || player.poseTransition !== null) {
+    clearPose(player);
+    player.pose = 'casual_idle';
+  }
+
+  return {
+    event: { type: 'drink', playerId: player.id, at: now },
+  };
 };
 
 interface VaultPlan {
@@ -169,6 +334,7 @@ export const integrateIdle = (player: ServerPlayer, now: number): void => {
     sprint: false,
     fire: false,
     reload: false,
+    interact: false,
     yaw: player.yaw,
     pitch: player.pitch,
     aimOrigin: null,
@@ -209,6 +375,12 @@ export const maybeRespawn = (player: ServerPlayer, now: number): void => {
     // Drop rewind history at respawn so a freshly respawned player can't be
     // hit by a delayed shot at their pre-death location.
     player.positionHistory = [];
+    // Pose doesn't survive respawn as-is — a corpse playing Sit then standing
+    // up alive at the spawn point would look bizarre. Clear all pose state
+    // and put the player back into the default casual stance. Voice agents
+    // can re-pose their NPCs after respawn if it makes narrative sense.
+    clearPose(player);
+    player.pose = 'casual_idle';
   }
 };
 
@@ -274,11 +446,162 @@ export const regenHealth = (player: ServerPlayer, now: number): void => {
   );
 };
 
+// Per-NPC voice-session alerts. Each kind is emitted to the active voice
+// session of the bot it concerns, formatted into a system message on the
+// server, and forwarded to the SDK via sendContextualUpdate so the agent
+// knows what its body just did or had done to it.
+interface BaseAlert {
+  targetConnId: string;
+  npcId: string;
+  sessionId: string;
+}
+export type NpcAlert =
+  | (BaseAlert & {
+      kind: 'damaged';
+      shooterName: string;
+      damage: number;
+      hpAfter: number;
+      killed: boolean;
+    })
+  | (BaseAlert & {
+      kind: 'shot_fired';
+      victimName: string | null;
+      hit: boolean;
+      killed: boolean;
+    })
+  | (BaseAlert & {
+      kind: 'friend_attacked';
+      friendName: string;
+      attackerName: string;
+    })
+  // A kill happened somewhere on the map that this NPC was not directly
+  // involved in (not the shooter, not the victim, victim wasn't a friend
+  // — those cases already fire damaged / shot_fired / friend_attacked).
+  // Used to let the agent register kills it would plausibly hear.
+  | (BaseAlert & {
+      kind: 'kill_witnessed';
+      killerName: string;
+      victimName: string;
+    })
+  // This NPC's 30-second hostility window toward a specific person just
+  // expired. Useful so the agent stops being "angry" mid-conversation
+  // when the timer runs out.
+  | (BaseAlert & {
+      kind: 'hostility_ended';
+      targetName: string;
+    })
+  // Another NPC (not this one) just reached the friendship threshold
+  // with a player. NPCs all know each other — they'd notice.
+  | (BaseAlert & {
+      kind: 'npc_befriended_player';
+      npcName: string;
+      playerName: string;
+    })
+  // The player this NPC is currently talking to just started reloading
+  // their rifle. ~1.5s window of vulnerability.
+  | (BaseAlert & {
+      kind: 'player_reloaded';
+      playerName: string;
+    })
+  // A human player joined the room while this NPC was in a voice session.
+  | (BaseAlert & {
+      kind: 'player_joined';
+      playerName: string;
+    })
+  // A human player left the room while this NPC was in a voice session.
+  // Excludes the player who was the NPC's conversation partner — that
+  // case ends the session entirely and is handled by onClose.
+  | (BaseAlert & {
+      kind: 'player_left';
+      playerName: string;
+    })
+  // Self-state confirmations: the NPC's own body just changed state due to
+  // a tool call OR the server-side regex fallback OR another in-game event.
+  // Critical for closing the agent's perception loop — without these, the
+  // LLM has no idea the regex/tool changed its state and may insist
+  // "my feet are stuck" when its body is actually walking.
+  | (BaseAlert & {
+      kind: 'self_follow_started';
+      playerName: string;
+      source: 'tool' | 'regex';
+    })
+  | (BaseAlert & {
+      kind: 'self_follow_stopped';
+      playerName: string;
+      source: 'tool' | 'regex' | 'auto';
+    })
+  | (BaseAlert & {
+      kind: 'self_flee_started';
+      playerName: string;
+    })
+  | (BaseAlert & {
+      kind: 'self_attack_started';
+      targetName: string;
+      source: 'tool' | 'damaged';
+    })
+  | (BaseAlert & {
+      kind: 'self_attack_stopped';
+      targetName: string;
+      source: 'tool' | 'expire';
+    })
+  | (BaseAlert & {
+      kind: 'self_befriended_player';
+      playerName: string;
+    })
+  | (BaseAlert & {
+      kind: 'self_patrol_started';
+      sprint: boolean;
+    })
+  | (BaseAlert & {
+      kind: 'self_lean_started';
+      /** Approximate distance the bot will walk to reach the wall. */
+      distM: number;
+    })
+  | (BaseAlert & {
+      kind: 'self_lean_no_wall';
+    })
+  // A player (or another NPC) just used the free coffee maker. Dispatched
+  // both to NPCs currently in a session with the drinker AND to NPCs within
+  // COFFEE.observationRadius of the maker who happen to be in a session
+  // with anyone. The discovery itself is seeded as a persona delta at room
+  // boot via GAME_CHANGES — this alert is the live "I see you using it"
+  // reaction. Guts (npcId === 'guts') gets a tailored line via dispatch
+  // that calls back to his existing coffee-price gripes.
+  | (BaseAlert & {
+      kind: 'coffee_consumed';
+      drinkerName: string;
+    })
+  // Self-state confirmation that THIS NPC has disengaged from conversation
+  // movement and is currently walking to the maker. Fired when the
+  // drink_coffee tool lands, or when transcript fallback catches the NPC's
+  // own commitment to go.
+  | (BaseAlert & {
+      kind: 'self_coffee_started';
+      source: 'tool' | 'transcript';
+    })
+  // Self-state confirmation that THIS NPC just finished drinking from the
+  // maker — fired after a drink_coffee tool call lands. Closes the agent's
+  // perception loop so the LLM doesn't immediately ask for another drink.
+  | (BaseAlert & {
+      kind: 'self_drank_coffee';
+    })
+  // Self-state confirmation that THIS NPC tried to walk to the coffee
+  // maker but couldn't reach it before the timeout / a higher-priority
+  // state (combat, flee) interrupted them. Lets the agent know in voice
+  // that the drink didn't happen.
+  | (BaseAlert & {
+      kind: 'self_coffee_unreachable';
+    });
+
+// Back-compat alias (older callsites use this name).
+export type NpcDamageAlert = NpcAlert;
+
 export const tryFire = (
   shooter: ServerPlayer,
   others: ServerPlayer[],
   now: number,
   aim: { aimOrigin: Vec3; aim: Vec3 } | null,
+  onNpcAlert?: (alert: NpcAlert) => void,
 ): GameEvent[] => {
   if (!shooter.alive || shooter.reloading || shooter.vaultEndAt !== null || shooter.ammo <= 0) return [];
 
@@ -365,18 +688,60 @@ export const tryFire = (
     },
   ];
 
+  let killedVictim = false;
+  let victimName: string | null = null;
   if (effectiveHit) {
     const victim = others.find((p) => p.id === effectiveHit.hitId);
     if (victim && victim.alive) {
       victim.health -= WEAPON.damage;
       victim.lastDamagedAt = now;
-      markAttack(shooter.name, victim, [shooter, ...others], now);
+      victimName = victim.name;
+      // Combat overrides social — break any pose the victim was in so the
+      // damage-reactive state machine (engage, flee, return fire) can take over.
+      clearPose(victim);
+      markAttack(shooter.name, victim, [shooter, ...others], now, (friend) => {
+        if (
+          onNpcAlert &&
+          friend.isBot &&
+          friend.npcId &&
+          friend.botConversationWith &&
+          friend.botActiveSessionId
+        ) {
+          onNpcAlert({
+            kind: 'friend_attacked',
+            targetConnId: friend.botConversationWith,
+            npcId: friend.npcId,
+            sessionId: friend.botActiveSessionId,
+            friendName: victim.name,
+            attackerName: shooter.name,
+          });
+        }
+      });
+      if (
+        onNpcAlert &&
+        victim.isBot &&
+        victim.npcId &&
+        victim.botConversationWith &&
+        victim.botActiveSessionId
+      ) {
+        onNpcAlert({
+          kind: 'damaged',
+          targetConnId: victim.botConversationWith,
+          npcId: victim.npcId,
+          sessionId: victim.botActiveSessionId,
+          shooterName: shooter.name,
+          damage: WEAPON.damage,
+          hpAfter: Math.max(0, victim.health),
+          killed: victim.health <= 0,
+        });
+      }
       if (victim.health <= 0) {
         victim.health = 0;
         victim.alive = false;
         victim.respawnAt = now + PLAYER.respawnMs;
         victim.deaths += 1;
         shooter.kills += 1;
+        killedVictim = true;
         events.push({
           type: 'kill',
           killerId: shooter.id,
@@ -385,6 +750,32 @@ export const tryFire = (
         });
       }
     }
+  }
+
+  // Shooter-side awareness: when a bot fires (hit or miss), tell its voice
+  // session so the agent can answer "why are you shooting?" honestly. For
+  // misses we still emit — the agent should know it pulled the trigger even
+  // if the round didn't connect.
+  if (
+    onNpcAlert &&
+    shooter.isBot &&
+    shooter.npcId &&
+    shooter.botConversationWith &&
+    shooter.botActiveSessionId
+  ) {
+    if (victimName === null && shooter.botTargetId) {
+      const intended = others.find((p) => p.id === shooter.botTargetId);
+      if (intended) victimName = intended.name;
+    }
+    onNpcAlert({
+      kind: 'shot_fired',
+      targetConnId: shooter.botConversationWith,
+      npcId: shooter.npcId,
+      sessionId: shooter.botActiveSessionId,
+      victimName,
+      hit: effectiveHit !== null,
+      killed: killedVictim,
+    });
   }
 
   return events;
@@ -443,4 +834,3 @@ const raycastPlayers = (
   }
   return best;
 };
-

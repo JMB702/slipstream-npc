@@ -1,11 +1,11 @@
-# Slipstream-NPC — project guide for Claude
+# Slipstream Rift — project guide for Claude
 
-Fork of [Slipstream](https://github.com/JMB702/slipstream). Same engine; different social contract: NPCs are peaceful by default, voiced by ElevenLabs Conversational AI, retaliate only when shot at. Players make friends with NPCs through conversation; NPC friends defend each other.
+3D third-person multiplayer arena. NPCs are peaceful by default, voiced by ElevenLabs Conversational AI, and retaliate only when shot at. Players make friends with NPCs through conversation; NPC friends defend each other. Forked from the combat-only Slipstream prototype.
 
-- **Repo**: https://github.com/JMB702/slipstream-npc
-- **Live game**: TBD (Vercel deploy not yet linked for this fork)
-- **PartyKit prod**: `wss://slipstream-npc.jmb702.partykit.dev` (project not yet deployed)
-- **Upstream (Slipstream)**: https://github.com/JMB702/slipstream — combat-only deathmatch parent project. Most engine docs below are inherited from upstream.
+- **Repo**: https://github.com/JMB702/slipstream-rift
+- **Live game**: TBD
+- **PartyKit prod**: set by the maintainer at deploy time; cloners should expect `slipstream-rift.<your-username>.partykit.dev` after `pnpm deploy:party`.
+- **Internal package name**: `@slipstream-npc/shared` — left unchanged to avoid a destructive workspace rename. Treat it as the historical id of this monorepo; the user-facing project is Slipstream Rift.
 
 ## Stack
 
@@ -84,7 +84,36 @@ public/audio/             — gunshot, dry-fire, hit-marker, reload (mp3)
 public/maps/fps_shooter/  — GLTF served to the client (scene.gltf + bin + textures)
 scripts/extract-map-collision.mjs — voxelizes Maps/<src>/scene.gltf into
                                     fps_shooter.collision.ts. Run via
-                                    `pnpm extract:collision`.
+                                    `pnpm extract:collision`. (Largely retired:
+                                    fps_shooter.collision.ts is now authored
+                                    in Blender's Colliders collection.)
+scripts/extract-map-nav.mjs       — turns walkarea.json (baked from Blender
+                                    `Walk area` mesh) into a typed waypoint
+                                    graph. Run via `pnpm extract:nav`.
+scripts/feedback-report.mjs       — joins events.jsonl + DO transcripts →
+                                    markdown. LLM-backed extraction via Haiku
+                                    when ANTHROPIC_API_KEY is in env.
+scripts/session-last.mjs          — calls `/admin/sessions` on every room,
+                                    pretty-prints the most-recent session(s).
+                                    Replaces the SQLite-decode dance.
+scripts/set-npc-state.mjs         — persona-delta CRUD via /admin/npc-state.
+scripts/upload-knowledge-base.mjs — uploads docs/world-bible.md to ElevenLabs
+                                    Knowledge Base and re-attaches to every
+                                    per-NPC agent.
+Maps/fps_shooter_game_arena_map_v3/walkarea.json — Blender-baked walk area
+                                    mesh (input to extract:nav). World-coord
+                                    pre-transformed in the Blender Python step
+                                    to match the collision file's origin.
+docs/
+  agent-tools.md     — paste-ready ElevenLabs dashboard JSON for the 6 tools
+                       (follow_player / stop_following / make_friend /
+                       flee_from / start_attacking / stop_attacking)
+  elevenlabs-setup.md — one-time agent setup notes (voice override toggle)
+  world-bible.md      — shared knowledge base attached to all NPC agents
+                        (arena setting, mechanics, what NPCs can/can't do)
+  workbook.html       — durable bug+feature tracker with status pills (B#/F#)
+logs/                 — gitignored. `pnpm dev | tee logs/events-YYYY-MM-DD.jsonl`
+                        to capture [EVENT] lines for `pnpm feedback:report`.
 ```
 
 ## Maps
@@ -95,7 +124,7 @@ PartyKit room by the map id, so different maps live in different rooms.
 | id | display | collision | size |
 | --- | --- | --- | --- |
 | `arena` | Original Arena | hand-authored `HOUSE_WALLS` + `SCATTERED_OBSTACLES` in `constants.ts` | 60×60 |
-| `fps_shooter` | FPS Shooter Arena | auto-extracted from `Maps/fps_shooter_game_arena_map_v3/scene.gltf` (voxelized at 0.5m, greedy-merged into ~900 AABBs) | 30×30 |
+| `fps_shooter` | FPS Shooter Arena | hand-authored in Blender (`Colliders` collection) + nav graph from Blender `Walk area` mesh (inset 0.4m for capsule radius) — see `extract:nav` | 30×30 |
 
 Default map id: `fps_shooter` (set in `packages/shared/src/maps.ts` as `DEFAULT_MAP_ID`).
 
@@ -116,9 +145,21 @@ pnpm dev               # client on :5173, party on :1999, parallel
 pnpm typecheck         # strict TS across the workspace
 pnpm build
 pnpm deploy:party      # PartyKit deploy (requires Adobe-free PartyKit login)
+
+# Map asset pipeline
+pnpm extract:collision # voxelize Maps/<src>/scene.gltf → fps_shooter.collision.ts
+pnpm extract:nav       # Blender-authored Walk area → fps_shooter.nav.ts (waypoint graph)
+
+# NPC + feedback workflow (see "Feedback pipeline" + "Workflow tooling" below)
+pnpm feedback:report   # join events.jsonl + DO transcripts → markdown report (LLM extract optional)
+pnpm session:last [N]  # last N voice sessions across all rooms, markdown — primary debug tool
+pnpm npc:state <npcId> "<summary>" [--evidence=…] [--source=…]   # add a persona delta
+pnpm npc:state --list <npcId>      # inspect persona deltas
+pnpm npc:state --clear <npcId>     # wipe persona deltas
+pnpm sync:kb           # upload docs/world-bible.md → ElevenLabs knowledge base, attach to all agents
 ```
 
-`vercel.json` at the repo root pins client builds for Vercel. `VITE_PARTYKIT_HOST` is set as a Vercel project env var (production scope) pointing at `slipstream-npc.jmb702.partykit.dev`. `apps/party/.env` (gitignored) holds `ACCESS_CODE=<4 digits>` for local dev — the `partykit dev` server reads it on startup.
+`vercel.json` at the repo root pins client builds for Vercel. `VITE_PARTYKIT_HOST` is set as a Vercel project env var (production scope) pointing at the deployed PartyKit host (e.g. `slipstream-rift.<your-username>.partykit.dev`). `apps/party/.env` (gitignored; see `apps/party/.env.example` for the schema) holds `ACCESS_CODE=<4 digits>` and the ElevenLabs secrets for local dev — the `partykit dev` server reads it on startup.
 
 ### Deployment (manual; not auto-on-merge)
 
@@ -232,7 +273,13 @@ Volume constants live at the top of `sfx.ts`. Source SFX live in `Audio/SFX/` (n
 
 ## State of the art (open polish items)
 
-Things that are wired but not yet polished. Pick these up in order of player-visibility.
+**Fork-specific in-flight work lives in [`docs/workbook.html`](docs/workbook.html).** Open the file in a browser for status pills + action items. Cards include B1 (voice session drops while stationary — instrumented, awaiting reproduction with ring buffer hot), B5/B9 (arena nav + sky-walking), F1 (Halsey — meta-fiction NPC creation, will use persona deltas), F2/F3 (sense-of-time follow-on, jump action). Pulling from there before doing other engine polish keeps the persona work cohesive.
+
+Queued fork-specific features (not yet in the workbook):
+
+- **NPC vision (player-triggered).** When a player asks an NPC to look at something ("what do you see," "look over there"), the NPC describes the scene in character. Architecture: ElevenLabs `look_around` tool + regex fallback → server requests an offscreen render from the talking player's client (camera at NPC's eye, yaw aligned with player's yaw so "look there" = "look where I'm looking") → client uploads ~30KB JPEG → server calls Claude Haiku vision → result returned as a `self_vision_result` self-state alert → agent's next turn voices it. Stall mechanic: tool response instructs the agent to say "hmm, let me see..." while the ~2s round-trip resolves. Bounded: one pending look per session, 8s timeout with fallback alert, only on explicit player request (no autonomous looking). Caveats noted in design: GL state restoration during the offscreen render, `LOCAL_HIDE_DIST` body-hide should be disabled for NPC POV captures, drei `<Html>` nameplates won't render into the target. Adds a new `GameChange` so personas know the capability exists. Promote to an `F#` workbook card when work starts.
+
+Engine-level (inherited from upstream Slipstream, all still real):
 
 - **Audit obstacle Y-bounds for `fps_shooter`** (see Known issues above). Highest-impact gameplay fix outstanding.
 - **RTT-component lag compensation.** Today's rewind covers `NET.interpolationDelayMs` only; not per-client RTT/2. Adding it requires a client ping loop (none exists today — the `ping`/`pong` wire types are defined but no code sends pings), an RTT estimator on the client, and a new `rtt` field on `InputFrame` so the server can rewind by `now - interpolationDelayMs - rtt/2`.
@@ -288,41 +335,210 @@ V1 is per-listener sessions, not true N→1→N multi-speaker. Agent has cross-p
 `ClientMessage`:
 - `consent { agreed, version }`
 - `voice_session_start { npcId, sessionId }`
-- `voice_session_end { sessionId }`
+- `voice_session_end { sessionId, reason? }` — `reason` is diagnostic (`proximity | npc_disappeared | sdk_ended | sdk_error | teardown | manual`); server emits it into the feedback pipeline so B1-style "session dropped without a user action" cases are visible
 - `transcript { npcId, sessionId, role: 'user' | 'agent', text, at }`
 
 `ServerMessage`:
 - `consent_required { version }`
-- `npc_context { npcId, sessionId, memoryBlob, friendship }`
-- `npc_audio` — broadcast TTS frames for listeners (V1 may use existing pubsub; V2 needs binary)
+- `npc_context { npcId, sessionId, agentId? | signedUrl?, memoryBlob, friendship, elapsedSinceLastMs? }` — elapsed-since-last drives the B2 greeting-recency bucket on the client
+- `npc_alert { npcId, sessionId, text }` — system message pushed into the live ConvAI session via `sendContextualUpdate`. Used to feed the agent in-game events (`damaged`, `shot_fired`, `friend_attacked`, etc.) AND self-state confirmations (`self_follow_started`, `self_attack_stopped`, etc.) so the LLM's perception stays aligned with server state. See "Self-state alerts" below.
 
 ## Where things live (new files in this fork)
 
 ```
-packages/shared/src/npc-roster.ts    — NPC personas (id, name, agentId, voiceId, personality, startingFriends)
-apps/party/src/social.ts             — markAttack, isHostileTo, pruneHostility
-apps/party/src/storage.ts            — Durable Object: friendship + transcripts + consent + memoryBlob composition
+packages/shared/src/
+  npc-roster.ts                       — NpcDef + NPCS (7 personas with baked agentIds)
+  npc-voice.ts (if present) / VOICE_BY_CHARACTER in npc-roster.ts — source of truth for
+                                        per-character voice ids (not a runtime input;
+                                        each agent has its tts.voice_id baked in)
+apps/party/src/
+  social.ts                           — markAttack, isHostileTo, pruneHostility,
+                                        adoptHostility, clearHostility
+  storage.ts                          — GameStorage: write-back cache over DO storage.
+                                        consent / friendship / transcript / lastSession /
+                                        npcState (persona deltas — see F5 section).
+  bots/
+    controller.ts                     — tickBot. State machine: patrol/hunt/engage.
+                                        Follow sub-state machine (HOLD ↔ FOLLOWING
+                                        with hysteresis + turn-first delay) — see
+                                        "Follow state machine" below.
+    aim.ts                            — findVisibleTarget (hostility-gated),
+                                        slewAngle, yawPitchToward
+    path.ts                           — planPath (returns null on unreachable goal
+                                        so the controller can drop+repick instead
+                                        of steering into walls)
+    waypoints.ts                      — getNavGraph: per-map cache from MapDef
 apps/client/src/voice/
-  mic.ts                             — getUserMedia + permission flow
-  ConvAISession.ts                   — @elevenlabs/client wrapper, per-NPC session
-  proximity.ts                       — distance-gated session start/stop
-  spatial.ts                         — PannerNode HRTF for NPC voice
-  mute.ts                            — global mute singleton (keyboard + gamepad)
-apps/client/src/ui/ConsentGate.tsx   — pre-lobby consent
-apps/client/src/ui/MuteIndicator.tsx — HUD widget
+  mic.ts                              — getUserMedia + permission flow
+  ConvAISession.ts                    — @elevenlabs/client wrapper. firstMessage
+                                        picked by recency bucket (B2 sense-of-time);
+                                        memoryBlob pushed via sendContextualUpdate
+                                        AFTER connect so it layers on the baked
+                                        persona instead of replacing it.
+  manager.ts                          — proximity-gated session start/end with
+                                        reason-tagged voice_session_end emits (B1)
+  mute.ts                             — global mute singleton (keyboard + gamepad)
+apps/client/src/ui/
+  ConsentGate.tsx                     — pre-lobby consent
+  MuteIndicator.tsx                   — HUD widget
 ```
 
-## ElevenLabs agent setup
+## ElevenLabs agent system (current — supersedes the older "dashboard setup" notes)
 
-Agents are authored in the ElevenLabs dashboard (one per NPC personality). For each agent:
-1. Set system prompt with NPC's full personality.
-2. Add a `make_friend` tool (Webhook) pointing at `https://<partykit-host>/parties/main/<roomId>/tools/make_friend`. Body schema:
-   ```json
-   { "npcId": "string", "playerName": "string", "sessionId": "string", "secret": "string" }
-   ```
-3. The secret is shared via `ELEVENLABS_AGENT_TOOL_SECRET` (set in `apps/party/.env` and in the agent's dashboard config).
+The voice stack is now substantially automated. Skim once; everything below is reproducible without dashboard clicks.
 
-See `docs/elevenlabs-setup.md` (to be written) for copy-pasteable JSON.
+### One agent per NPC, created via REST API
+
+Every NPC in `npc-roster.ts` has a real `agentId` (no more `TODO_AGENT_ID_*` placeholders). Each agent has:
+
+- **Baked system prompt** = the NPC's `personality` field (multi-paragraph backstory + speech tics + topic rotation + things-to-avoid).
+- **Baked voice** (`tts.voice_id`) per `VOICE_BY_CHARACTER` mapping — no per-session voice override; the agent ID alone selects the right voice.
+- **Six webhook tools** attached (see "Tool webhooks" below).
+- **Shared knowledge base** attached (the world bible — see below).
+- **Overrides** still enabled for `voice_id` / `first_message` / `prompt` on the platform side, so legacy override paths don't 422 — but the client only uses `firstMessage` (greeting selection) and pushes memoryBlob via `sendContextualUpdate` instead of overriding `prompt`.
+
+`resolveAgentId(npc)` in `server.ts` returns `npc.agentId` directly. The old `ELEVENLABS_AGENT_ID` env-var fallback is dead.
+
+### Tool webhooks (six total)
+
+All routed by `apps/party/src/server.ts:onRequest` under `/parties/main/<roomId>/tools/<name>`, secret-gated by `ELEVENLABS_AGENT_TOOL_SECRET`. Each tool's dashboard JSON is in [`docs/agent-tools.md`](docs/agent-tools.md).
+
+| Tool | Effect on the game |
+|---|---|
+| `make_friend` | Friendship score += `SOCIAL.friendBoost`. Past threshold the player and NPC are mutually `friendsWith` and the bot defends them on damage cascade. |
+| `follow_player` | Sets `bot.botFollowing = humanId`. Bot path-finds with the follow state machine. |
+| `stop_following` | Clears `bot.botFollowing`. |
+| `flee_from` | Sets `bot.botFleeingFrom = { id, until: now + SOCIAL.hostilityMs }`. Bot paths away. |
+| `start_attacking` | Conversationally-induced hostility (`adoptHostility`). 30s window, no friend cascade. |
+| `stop_attacking` | Clears hostility toward a target (`clearHostility`). Also drops `botTargetId` if it matches. |
+
+Tool params arrive as either query string OR JSON body. Both forms supported because the dashboard form-config defaults to query and the JSON-mode dashboard defaults to body.
+
+### Knowledge base (shared world bible)
+
+Every agent has a shared knowledge base document attached: [`docs/world-bible.md`](docs/world-bible.md). Describes the arena, what NPCs can/can't do, who the other NPCs are, the outside world, and the deliberately-ambiguous "who runs this." Re-upload with `pnpm sync:kb` after editing — the script POSTs to `/v1/convai/knowledge-base/text` and re-PATCHes every agent's `knowledge_base` array.
+
+### memoryBlob (dynamic per-session)
+
+Built in `server.ts:buildMemoryBlob` at session start, pushed to the agent via `sendContextualUpdate` after connect. Sections (in order):
+
+1. **`## What's changed about you (authoritative — overrides your persona)`** — persona deltas. If non-empty, instructs the LLM to treat these as TRUE NOW and the baked persona as the prior baseline. See "Persona deltas (F5)" below.
+2. **`## The game you live in`** — boilerplate world description.
+3. **`## Time since you last talked`** — present only when this player has spoken with this NPC before (per `getLastSessionEnd`). Tells the LLM how to phrase the gap.
+4. **`## Right now`** — live state: health, ammo, follow target, flee target, hostility toward this player.
+5. **Friendship score** + **recent transcript** + **cross-pollination** lines (other players this NPC spoke with in the last 5 min).
+
+Persona (the agent's static system prompt) is NOT in the blob — it lives on the agent and the blob layers above it.
+
+## Persona deltas (F5) — durable NPC self-knowledge
+
+When in-fiction events change a character ("your shoulder pain is gone", "your friend Halsey is back"), we don't re-PATCH the ElevenLabs agent. We write a delta to DO storage and surface it via memoryBlob.
+
+- Storage key: `state:<npcId>` → `NpcStateEntry[]` (`{ at, summary, evidence?, source }`). Capped at 50, oldest dropped.
+- API: `GET/POST/DELETE /admin/npc-state?npcId=…` (secret-gated, no consent check — operator action).
+- CLI: `pnpm npc:state <npcId> "<summary>" [--evidence=…] [--source=…]`, plus `--list` / `--clear`.
+- memoryBlob front-loads the delta list under `## What's changed about you` with instructions that it overrides the persona where they conflict.
+- **Per-room** today (each map's DO has its own state). A delta written on `fps_shooter` won't appear when the same NPC is talking on `arena`. Documented v1 limitation; same applies to transcripts and friendships.
+
+The first hand-applied delta is Mira's shoulder-pain healing (5/16). The next likely use is the Halsey return (F1 in the workbook).
+
+### Game changes — the durable "NPCs notice every change you ship" pattern
+
+Hand-applying deltas via `pnpm npc:state` is for one-offs. **For permanent changes to the world that every NPC should know about** (new mechanics, new characters, world-state shifts), use the registry instead:
+
+- File: [`packages/shared/src/game-changes.ts`](packages/shared/src/game-changes.ts) exports `GAME_CHANGES: readonly GameChange[]`.
+- Each entry: `{ id, at, scope: 'all' | npcId[], summary, evidence? }`. Summary is NPC-POV, second person, present tense — same shape as a manual delta.
+- Server's `onStart` calls `seedGameChanges()`, which walks the array. For each `id` whose `seeded:<id>` flag is absent in this room's DO, it appends a delta to every in-scope NPC's `state:<npcId>` and sets the flag. Idempotent — re-seeding never duplicates.
+- Logs each seed: `[game-change] seeded <id> → N NPC(s) in room <map>`.
+
+**The workflow is:**
+
+1. Ship the code change (add coffee, add a character, fix a bug, etc.).
+2. Add a `GameChange` entry describing what NPCs should know.
+3. Reload the server. Each room's onStart writes the delta into NPC state exactly once.
+4. Next session, NPCs reference the change in character via memoryBlob.
+
+**Important conventions:**
+
+- The `id` is the dedup key. **Never rename or reuse.** If you change an entry's wording after it's seeded into a room, existing rooms keep the old wording — bump the id (e.g. add `-v2`) to re-seed everywhere.
+- `at` should be deterministic across deploys. Use `Date.parse('2026-05-16T00:00:00Z')`, not `Date.now()`.
+- Each map's DO has its own seeded state. A change seeded on `fps_shooter` will re-seed when a fresh `arena` DO wakes up (correct — both maps need the knowledge), then mark seeded there too.
+- The 50-entry cap on `state:<npcId>` means very old game-changes drop off. If the registry grows past ~40 entries, raise `NPC_STATE_CAP` in storage.ts or partition into tiered storage.
+- **What does NOT go here:** per-player history (use friendship), event-triggered cascades like "first player to drink coffee" (those stay imperative — see `coffee:discovered`), or one-off character changes you applied with `pnpm npc:state`. If you DO want a one-off to be reproducible across fresh rooms, add it here instead.
+
+## Follow state machine (B6 + B10)
+
+The bot's follow behavior is a discrete state machine, NOT a continuous "stay 3m behind player" computation. The naïve version had two visible bugs (always-behind-player, walks-backward-on-180°-approach) that the state machine fixes.
+
+```
+HOLD          (close)  ────────────→ stand still, goal = bot.position
+              dist > followResumeDist (4m)
+              ────────────────────────────→ FOLLOWING
+FOLLOWING     (far)    ────────────→ walk toward player, goal = player.position
+              dist ≤ followStandoffDist (2.5m)
+              ────────────────────────────→ HOLD
+```
+
+On `HOLD → FOLLOWING`, the controller sets `botFollowHoldUntil = now + followResumeDelayMs (500ms)`. During that window the movement section zeroes forward/right while the path planner and yaw slew continue to run, so the bot turns to face the player FIRST and then walks. Eliminates the "walks-backwards-while-turning" gait.
+
+Hysteresis gap (2.5m inner, 4m outer): the player can walk past the bot at close range without the bot retreating to maintain standoff. State fields live on `ServerPlayer`: `botFollowMoving?: boolean`, `botFollowHoldUntil?: number`. Constants in `BOT`: `followStandoffDist`, `followResumeDist`, `followResumeDelayMs`.
+
+State is reset on every transition (tool handler clear/set, regex fallback, disconnect) so a fresh follow always gets the turn-first delay.
+
+## Self-state alerts (B10)
+
+The agent's LLM has no proprioception. When the server changes a bot's `botFollowing` / `botFleeingFrom` / `hostility` / `friendsWith` (regardless of which code path made the change), the LLM doesn't notice — and will confidently deny what its body is doing ("my feet are stuck") on the next turn.
+
+Fix: `server.ts:pushSelfStateAlert(bot, alert)` formats an `npc_alert` ServerMessage and sends it to the bot's active voice session (if any). The SDK queues it as a contextual update for the agent's next turn. Wired into every state-change site:
+
+- All six tool handlers
+- The regex fallback in `applyTranscriptIntent` (the path that catches "follow me" / "stop following" in user transcripts when the LLM doesn't fire the tool)
+- Damage cascade (`markAttack` cascading hostility to friends) — fires `friend_attacked`
+- Hostility expiry (`pruneHostility`) — fires `hostility_ended`
+
+`NpcAlert` (in `apps/party/src/simulation.ts`) is the discriminated union of all alert kinds. Currently 15 kinds: `damaged | shot_fired | friend_attacked | kill_witnessed | hostility_ended | npc_befriended_player | player_reloaded | player_joined | player_left | self_follow_started | self_follow_stopped | self_flee_started | self_attack_started | self_attack_stopped | self_befriended_player`. `server.ts:formatNpcAlert` is the single point where each kind becomes a `[System: …]` system message.
+
+## Feedback pipeline
+
+The server emits structured `[EVENT] {json}` lines on stdout for every interesting thing. In dev: `pnpm dev 2>&1 | tee logs/events-$(date +%Y-%m-%d).jsonl`. The lines are greppable past PartyKit's ANSI noise.
+
+Event kinds (defined in `server.ts`):
+- `tool_call` — every webhook tool, ok=true/false
+- `voice_session` — start / end (with `reason` for B1 diagnostics, `durationMs` for telemetry)
+- `hostility_change` — set / clear / expire / cascade
+- `shot_fired` — every bot fire (hit + killed flags + shooter NPC id)
+- `friendship_change` — delta, new score, becameFriend boolean
+- `nav_blocked` — controller fires when `planPath` returns null
+- `feedback_signal` — regex-extracted from user transcripts (`bug`, `stuck`, `should`, etc. — see `FEEDBACK_TRIGGERS`)
+
+Also kept as a **1000-event in-memory ring buffer** on the server (per-DO isolate) so the admin HTTP routes can join events with transcripts without needing the tee'd file.
+
+`pnpm feedback:report [--player=X] [--since=24h] [--no-llm]` — reads logs/events-*.jsonl + decodes DO transcripts directly (via `v8.deserialize`) + retroactively regex-scans transcripts for feedback signals + (if `ANTHROPIC_API_KEY` is set) calls Haiku for structured `{category, summary, evidence, urgency, area}` extraction from the player's utterances. Produces markdown.
+
+## Workflow tooling (F6) — the durable feedback path
+
+Don't decode DO SQLite by hand. The path going forward is:
+
+1. Player plays the game.
+2. Player tells the agent something interesting happened.
+3. `pnpm session:last [N]` — calls `/admin/sessions` on both `fps_shooter` and `arena` rooms, merges, sorts by recency, pretty-prints markdown with: room, time range, NPCs, transcript, events fired during the window, persona deltas that were active at session start.
+
+Admin HTTP routes, all secret-gated by `ELEVENLABS_AGENT_TOOL_SECRET`, scoped per-room (per-DO):
+
+| Route | Method(s) | Returns |
+|---|---|---|
+| `/admin/sessions?count=N&player=X&since=2h` | GET | Last N sessions decoded from transcripts, joined with ring-buffer events + persona-delta snapshots |
+| `/admin/state` | GET | Every NPC's persona-delta entries in one call |
+| `/admin/snapshot` | GET | Live game state: positions, hostility (with msRemaining), follow targets, friendsWith |
+| `/admin/npc-state?npcId=…` | GET / POST / DELETE | Persona-delta CRUD (used by `pnpm npc:state`) |
+
+## Workbook
+
+[`docs/workbook.html`](docs/workbook.html) is the durable bug + feature tracker. Self-contained HTML with CSS, opens in any browser. Status pills (`todo` / `doing` / `done` / `blocked`), priority pills, item cards (bugs vs features), TOC with anchor jumps.
+
+The convention: every observed bug gets a `B<N>` card. Every feature gets an `F<N>` card. Each card has: symptom, root cause, fix, action items (checkboxes), and a verification block. Promote pills as work lands.
+
+The workbook is the canonical place to plan and track multi-turn work. CLAUDE.md describes the architecture; the workbook tracks the in-flight changes.
 
 ## What NOT to do (fork additions)
 
@@ -330,3 +546,11 @@ See `docs/elevenlabs-setup.md` (to be written) for copy-pasteable JSON.
 - Don't trust client-side friendship claims. Server is authoritative; client just renders what comes back in snapshots and `npc_context`.
 - Don't bypass `ConsentGate` for testing convenience — Florida two-party consent applies. If you need a dev mode, document it explicitly and gate on a Vite env var so it can't ship.
 - Don't store raw audio. Only transcripts are persisted (and only with consent).
+- **Don't change a bot's `botFollowing` / `botFleeingFrom` / `hostility` / `friendsWith` without calling `pushSelfStateAlert`.** The LLM has no proprioception; without the alert it will confidently deny what its body is doing on the next turn (B10's root cause). Every state-change site must push.
+- **Don't add a new `NpcAlert` kind without also adding a `formatNpcAlert` case.** The default branch returns `null` and silently drops the alert.
+- **Don't decode DO SQLite by hand to look at sessions.** Use `pnpm session:last`. The script walks all rooms, joins events, and renders markdown in one shot. If `session:last` doesn't show what you need, EXTEND IT — that's the durable workflow path (F6).
+- **Don't add work items outside the workbook ([`docs/workbook.html`](docs/workbook.html)) for anything multi-turn.** The workbook is the canonical tracker; CLAUDE.md is the architectural doc. Status pills + B/F numbering give us a thread to follow across sessions.
+- **Don't PATCH agent system prompts to fix one-off character changes.** Use persona deltas instead (`pnpm npc:state`). The agent's baked persona is the prior baseline; deltas are how in-fiction changes propagate without destroying the persona or requiring rollback machinery.
+- **Don't ship a game mechanic without a `GameChange` entry** if it's something NPCs should be able to talk about. The registry lives in `packages/shared/src/game-changes.ts` and is auto-seeded on `onStart`. Bug fixes that don't change in-game reality (e.g. internal nav improvements) don't need entries; player-visible mechanics (coffee, weapons, mode changes) do.
+- **Don't rename or reuse a `GameChange.id`.** It's the dedup key. If you change an entry's wording after it's seeded into a room, the room keeps the old wording — bump the id to re-seed everywhere.
+- **Don't assume cross-room state continuity.** Each map's PartyKit room is its own DO. Transcripts, friendships, persona deltas, last-session timestamps are all per-room. A delta written on `fps_shooter` is invisible on `arena`. Either accept this v1 limitation or implement a global state plane.

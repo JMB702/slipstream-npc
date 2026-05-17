@@ -15,7 +15,15 @@
     "format": "prettier --write .",
     "deploy:party": "pnpm --filter party deploy",
     "deploy:client": "pnpm --filter client build && echo 'Push to Git or run: vercel --prod'",
-    "extract:collision": "node scripts/extract-map-collision.mjs"
+    "extract:collision": "node scripts/extract-map-collision.mjs",
+    "extract:nav": "node scripts/extract-map-nav.mjs",
+    "catalogue": "node scripts/animation-catalogue.mjs",
+    "bake:characters": "node scripts/bake-character-glb.mjs",
+    "bake:bible": "node scripts/bake-world-bible.mjs",
+    "feedback:report": "node scripts/feedback-report.mjs",
+    "sync:kb": "node scripts/upload-knowledge-base.mjs",
+    "npc:state": "node scripts/set-npc-state.mjs",
+    "session:last": "node scripts/session-last.mjs"
   },
   "devDependencies": {
     "prettier": "^3.4.2",

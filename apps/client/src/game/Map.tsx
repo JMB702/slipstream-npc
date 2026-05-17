@@ -1,5 +1,6 @@
 import { HOUSE_WALLS, MAPS, SCATTERED_OBSTACLES, type Obstacle } from '@slipstream-npc/shared';
 import { useGame } from '../store.js';
+import { CoffeePrompt } from './CoffeePrompt.js';
 import { MapGltf } from './MapGltf.js';
 
 const renderObstacle = (o: Obstacle, key: number, color: string) => (
@@ -49,6 +50,7 @@ export const Arena = () => {
       )}
 
       {mapId === 'fps_shooter' && <MapGltf id={mapId} />}
+      {mapId === 'fps_shooter' && <CoffeePrompt />}
 
       {mapId === 'arena' && (
         <gridHelper args={[map.size, map.size, '#2a3050', '#1a2030']} position={[0, 0.01, 0]} />

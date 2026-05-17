@@ -2,6 +2,7 @@ const GUNSHOT_URL = '/audio/gunshot.mp3';
 const DRY_FIRE_URL = '/audio/dry-fire.mp3';
 const HIT_MARKER_URL = '/audio/hit-marker.mp3';
 const RELOAD_URL = '/audio/reload.mp3';
+const COFFEE_SIP_URL = '/audio/coffee-sip.mp3';
 
 const GUNSHOT_MAX_DIST = 60;
 const GUNSHOT_MIN_VOL = 0.05;
@@ -11,6 +12,8 @@ const HIT_MARKER_VOL = 0.8;
 const RELOAD_MAX_DIST = 25;
 const RELOAD_MIN_VOL = 0;
 const RELOAD_BASE_VOL = 0.5;
+const COFFEE_SIP_MAX_DIST = 18;
+const COFFEE_SIP_BASE_VOL = 0.6;
 
 const ONSET_THRESHOLD = 0.1;
 
@@ -90,6 +93,16 @@ export function playReload(distance: number): void {
   const gain = Math.max(RELOAD_MIN_VOL, t) * RELOAD_BASE_VOL;
   if (gain <= 0) return;
   playBuffer(RELOAD_URL, gain);
+}
+
+// Coffee-sip cue — plays per drink event. No-op silently if the mp3 isn't in
+// /audio/ yet so the rest of the interaction (heal, buff, NPC alert) still
+// works while audio is being sourced.
+export function playCoffeeSip(distance: number): void {
+  const t = Math.max(0, Math.min(1, 1 - distance / COFFEE_SIP_MAX_DIST));
+  const gain = t * COFFEE_SIP_BASE_VOL;
+  if (gain <= 0) return;
+  playBuffer(COFFEE_SIP_URL, gain);
 }
 
 export function playHitMarker(): void {

@@ -5,6 +5,12 @@ export interface InputState {
   sprint: boolean;
   fire: boolean;
   reload: boolean;
+  // "Use the thing in front of me" — hold to engage. Tracks the wall-clock
+  // start of the current hold (E key or gamepad Y); null when not pressed.
+  // The full interact press is fired by consumeInteractHold() once the hold
+  // duration exceeds INTERACT_HOLD_MS, gated by an internal flag so a single
+  // hold can't fire repeatedly.
+  interactHeldSince: number | null;
   // Hold-to-aim flag (RMB on PC, LT/L2 on gamepad). Camera reads this to
   // pull in for ADS — purely a presentation flag, not gameplay-affecting.
   aiming: boolean;
@@ -13,9 +19,16 @@ export interface InputState {
   pointerLocked: boolean;
 }
 
+// How long the player must hold E / gamepad Y before the interact fires.
+// The CoffeePrompt progress arc fills over the same duration so the hold
+// feels intentional — a brief commitment, not a tap.
+export const INTERACT_HOLD_MS = 1500;
+
 export const createInput = (canvas: HTMLCanvasElement): {
   state: InputState;
   consumeFire(): boolean;
+  consumeInteractHold(): boolean;
+  getInteractHoldProgress(): number;
   destroy(): void;
 } => {
   const state: InputState = {
@@ -25,11 +38,18 @@ export const createInput = (canvas: HTMLCanvasElement): {
     sprint: false,
     fire: false,
     reload: false,
+    interactHeldSince: null,
     aiming: false,
     yaw: 0,
     pitch: 0,
     pointerLocked: false,
   };
+
+  // Once a hold completes and fires interact, this flag suppresses re-firing
+  // for the remainder of that hold. Cleared on release so the next press is
+  // a fresh hold. Kept outside `state` because callers shouldn't read it
+  // directly — consumeInteractHold() is the only sanctioned consumer.
+  let interactFiredThisHold = false;
 
   // Movement and buttons are merged from two sources (keyboard, gamepad).
   // Each source writes to its own slot; mergeAxes/mergeButtons recompute the
@@ -72,10 +92,20 @@ export const createInput = (canvas: HTMLCanvasElement): {
   };
 
   const onKeyDown = (e: KeyboardEvent) => {
+    // Start a fresh interact hold on KeyE press. Skip if E is already held
+    // (OS key-repeat would otherwise reset the timer).
+    if (e.code === 'KeyE' && !keys.has('KeyE')) {
+      state.interactHeldSince = performance.now();
+      interactFiredThisHold = false;
+    }
     keys.add(e.code);
     updateKbAxes();
   };
   const onKeyUp = (e: KeyboardEvent) => {
+    if (e.code === 'KeyE') {
+      state.interactHeldSince = null;
+      interactFiredThisHold = false;
+    }
     keys.delete(e.code);
     updateKbAxes();
   };
@@ -155,6 +185,7 @@ export const createInput = (canvas: HTMLCanvasElement): {
   // edge-triggered as a sprint toggle (click-on / click-off).
   let prevTriggerPressed = false;
   let prevSprintPressed = false;
+  let prevInteractPressed = false;
   let sprintToggled = false;
   let lastPollMs = performance.now();
   let rafHandle = 0;
@@ -178,6 +209,7 @@ export const createInput = (canvas: HTMLCanvasElement): {
       }
       prevTriggerPressed = false;
       prevSprintPressed = false;
+      prevInteractPressed = false;
       sprintToggled = false;
       rafHandle = requestAnimationFrame(pollGamepad);
       return;
@@ -224,6 +256,20 @@ export const createInput = (canvas: HTMLCanvasElement): {
     }
     prevTriggerPressed = triggerPressed;
 
+    // Button 3 = Y on Xbox, Triangle on PlayStation. Hold to engage —
+    // mirrors the keyboard KeyE flow so consumeInteractHold() can fire the
+    // interact once the hold duration crosses INTERACT_HOLD_MS regardless
+    // of input device. Rising edge starts the hold timer; release clears.
+    const interactPressed = isPressed(pad, 3);
+    if (interactPressed && !prevInteractPressed) {
+      state.interactHeldSince = performance.now();
+      interactFiredThisHold = false;
+    } else if (!interactPressed && prevInteractPressed) {
+      state.interactHeldSince = null;
+      interactFiredThisHold = false;
+    }
+    prevInteractPressed = interactPressed;
+
     mergeAxes();
     mergeButtons();
 
@@ -246,6 +292,27 @@ export const createInput = (canvas: HTMLCanvasElement): {
       // edge-trigger: keep semi-auto by clearing here
       state.fire = false;
       return v;
+    },
+    // Returns true ONCE per hold when the held duration has crossed
+    // INTERACT_HOLD_MS. Subsequent calls during the same hold return false.
+    // Releasing the button (handled in onKeyUp / the gamepad poll) clears
+    // the fired flag so a fresh press starts a new hold.
+    consumeInteractHold(): boolean {
+      if (state.interactHeldSince === null) return false;
+      if (interactFiredThisHold) return false;
+      const heldMs = performance.now() - state.interactHeldSince;
+      if (heldMs < INTERACT_HOLD_MS) return false;
+      interactFiredThisHold = true;
+      return true;
+    },
+    // 0..1 fill ratio for the hold progress UI. 0 when not pressed; clamps
+    // to 1 once the hold completes (so the arc visually finishes filling
+    // before consumeInteractHold() fires the actual press).
+    getInteractHoldProgress(): number {
+      if (state.interactHeldSince === null) return 0;
+      const heldMs = performance.now() - state.interactHeldSince;
+      const r = heldMs / INTERACT_HOLD_MS;
+      return r < 0 ? 0 : r > 1 ? 1 : r;
     },
     destroy(): void {
       window.removeEventListener('keydown', onKeyDown);

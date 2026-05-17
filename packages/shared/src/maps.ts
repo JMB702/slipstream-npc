@@ -1,6 +1,7 @@
 import { HOUSE_WALLS, MAP, SCATTERED_OBSTACLES, type Obstacle } from './constants.js';
 import { FPS_SHOOTER_BOUNDS, FPS_SHOOTER_OBSTACLES } from './maps/fps_shooter.collision.js';
 import { FPS_SHOOTER_TRIS, type CollisionTri } from './maps/fps_shooter.mesh.js';
+import { FPS_SHOOTER_EDGES, FPS_SHOOTER_WAYPOINTS } from './maps/fps_shooter.nav.js';
 import type { Vec3 } from './state.js';
 
 export type MapId = 'fps_shooter' | 'arena';
@@ -386,13 +387,6 @@ const sampleSegmentBlockedAtY = (
   return false;
 };
 
-const FPS_SHOOTER_GRID = buildMultiLevelGrid(
-  FPS_SHOOTER_OBSTACLES,
-  Math.max(FPS_SHOOTER_BOUNDS.sizeX, FPS_SHOOTER_BOUNDS.sizeZ) / 2 - 2,
-  3,
-  12,
-);
-
 // Authored in Blender (Spawn Visualization collection), audited against
 // FPS_SHOOTER_OBSTACLES — every point is clear of all inflated AABBs at
 // y=4 and lands on the floor at y=1.
@@ -430,8 +424,8 @@ export const MAPS: Record<MapId, MapDef> = {
     obstacles: FPS_SHOOTER_OBSTACLES,
     collisionTris: FPS_SHOOTER_TRIS,
     spawnPoints: FPS_SHOOTER_SPAWN_POINTS,
-    waypoints: FPS_SHOOTER_GRID.waypoints,
-    edges: FPS_SHOOTER_GRID.edges,
+    waypoints: FPS_SHOOTER_WAYPOINTS,
+    edges: FPS_SHOOTER_EDGES,
     gltfOffset: [
       FPS_SHOOTER_BOUNDS.offsetX,
       FPS_SHOOTER_BOUNDS.offsetY,

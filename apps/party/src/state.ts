@@ -51,6 +51,61 @@ export interface ServerPlayer extends PlayerState {
   // Recently chosen patrol goal node indices — drives variety in
   // pickExplorationGoal so bots don't oscillate between the same two nodes.
   botVisitedRecent?: number[];
+  // Player id this NPC is currently in a voice conversation with. Set by
+  // server.handleVoiceSessionStart, cleared on voice_session_end / player
+  // disconnect. tickBot freezes movement and faces this player when set
+  // (unless interrupted by hostility-driven engage).
+  botConversationWith?: string | null;
+  // Conversation-session id active with `botConversationWith`. Used by the
+  // server to address npc_alert messages back to the right session — the
+  // SDK uses sessionId to discard stale alerts after a reconnect.
+  botActiveSessionId?: string | null;
+  // Player id the NPC is currently following (because the agent called the
+  // follow_player tool during a session). tickBot path-finds toward this
+  // player while patrol/engage haven't taken precedence.
+  botFollowing?: string | null;
+  // Follow state machine. `botFollowMoving` is true when the bot is actively
+  // walking toward the follow target (FOLLOWING sub-state), false when it's
+  // standing in the standoff/hysteresis band (HOLD sub-state). Hysteresis
+  // gap (BOT.followStandoffDist → BOT.followResumeDist) means the player
+  // can walk past the bot at close range without the bot retreating to
+  // maintain distance — they just stay put until the player is far enough
+  // away to retrigger FOLLOWING. `botFollowHoldUntil` is a wall-clock deadline
+  // set on HOLD → FOLLOWING transitions; until it expires, forward motion is
+  // suppressed (yaw still slews) so the bot turns toward the player BEFORE
+  // walking.
+  botFollowMoving?: boolean;
+  botFollowHoldUntil?: number;
+  // Player id the NPC is fleeing FROM (because the agent called flee_from).
+  // `until` is a wall-clock deadline after which fleeing decays back to
+  // patrol unless re-triggered.
+  botFleeingFrom?: { id: string; until: number } | null;
+  // When true, the bot sprints in non-engage states regardless of next-waypoint
+  // distance. Set by /tools/sprint_patrol, cleared by /tools/patrol and by
+  // any state that overrides patrol (engage, follow, flee, lean). Combat
+  // already governs its own sprint behavior, so this is irrelevant during engage.
+  botForceSprint?: boolean;
+  // Set by /tools/lean_wall. Once set, the bot path-finds to this point;
+  // when within waypointArriveDist the controller applies pose='lean_wall'
+  // and clears the field. Bot's facing is computed to put its back against
+  // the wall at the requested standoff. Cleared by patrol/sprint_patrol/
+  // follow/flee/stop_attacking transitions.
+  botLeanTarget?: { position: Vec3; yaw: number } | null;
+  // Wall-clock time (ms, server frame) when the current pose / poseTransition
+  // started. tickBot and the simulation loop use this to flip transitions to
+  // their steady-state pose after the matching POSE.*Ms duration elapses.
+  poseStartedAt?: number;
+  // Date.now() of this player's most recent successful coffee drink. Server-
+  // only — the wire-visible buff window lives in PlayerState.coffeeBuffUntil.
+  // Used for telemetry and for future nonzero cooldowns if we re-enable one.
+  lastCoffeeDrinkAt?: number;
+  // Wall-clock deadline by which this bot wants to reach the coffee maker.
+  // Set when the agent calls the drink_coffee tool; the bot controller
+  // overrides its patrol goal with the coffee maker's navigation point until either
+  // (a) the bot gets within COFFEE.interactRadius and tryDrinkCoffee fires,
+  // or (b) the deadline elapses (couldn't reach the maker — give up).
+  // Cleared in both cases.
+  botGoingForCoffeeUntil?: number;
 }
 
 export const initialPlayer = (
@@ -81,6 +136,12 @@ export const initialPlayer = (
   isBot: options?.isBot ?? false,
   characterId: options?.characterId ?? 'soldier',
   friendsWith: [],
+  // Casual is the default vibe — peaceful NPCs, players hands-down. Combat
+  // mode (pose === null) engages on the H key, RB on Xbox, or any incoming
+  // fire/damage event via applyInput / tryFire's clearPose calls.
+  pose: 'casual_idle',
+  poseTransition: null,
+  danceVariant: 0,
   pendingInputSeq: 0,
   grounded: true,
   lastIntegratedAt: now,

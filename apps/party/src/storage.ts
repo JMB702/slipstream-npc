@@ -11,11 +11,32 @@ export interface FriendshipRecord {
   becameFriendAt?: number;
 }
 
+// A single durable change to an NPC's self-knowledge. These layer ON TOP of
+// the baked persona (the agent's system prompt) — the agent reads them at
+// every session start via buildMemoryBlob, treats them as authoritative when
+// they conflict with the persona, and integrates them in-character. Used for
+// in-fiction changes the persona can't anticipate ("your shoulder pain is
+// gone now", "Halsey is alive and back", etc.).
+export interface NpcStateEntry {
+  at: number;
+  summary: string;
+  evidence?: string;
+  source: string;
+}
+
 const TRANSCRIPT_CAP = 200;
+const NPC_STATE_CAP = 50;
 
 const consentKey = (playerName: string): string => `consent:${playerName}`;
 const friendshipKey = (npcId: string, playerName: string): string => `friend:${npcId}:${playerName}`;
 const transcriptKey = (npcId: string, playerName: string): string => `tx:${npcId}:${playerName}`;
+const lastSessionKey = (npcId: string, playerName: string): string => `last:${npcId}:${playerName}`;
+const npcStateKey = (npcId: string): string => `state:${npcId}`;
+const COFFEE_DISCOVERED_KEY = 'coffee:discovered';
+// Game-change seeding: `seeded:<changeId>` records whether a static GameChange
+// from packages/shared/src/game-changes.ts has been written into this room's
+// NPC state. One-shot per room. The seeder runs on onStart and is idempotent.
+const gameChangeSeededKey = (id: string): string => `seeded:${id}`;
 
 // Write-back cache over PartyKit room.storage (Cloudflare Durable Object).
 // Hot-path reads stay in-memory; writes update the cache and queue an async
@@ -26,9 +47,14 @@ export class GameStorage {
   private consents = new Map<string, ConsentRecord>();
   private friendships = new Map<string, FriendshipRecord>();
   private transcripts = new Map<string, TranscriptLine[]>();
+  private lastSessionEnds = new Map<string, number>();
+  private npcStates = new Map<string, NpcStateEntry[]>();
   private consentLoaded = new Set<string>();
   private friendshipLoaded = new Set<string>();
   private transcriptLoaded = new Set<string>();
+  private lastSessionLoaded = new Set<string>();
+  private npcStateLoaded = new Set<string>();
+  private coffeeDiscovered: boolean | null = null;
 
   constructor(private storage: Party.Storage) {}
 
@@ -107,6 +133,81 @@ export class GameStorage {
     while (list.length > TRANSCRIPT_CAP) list.shift();
     this.transcripts.set(k, list);
     await this.storage.put(k, list);
+  }
+
+  // Wall-clock ms at which the most recent voice session between this NPC
+  // and this player ended. Used to compute elapsed-since-last for the
+  // greeting-recency bucket (B2 sense-of-time).
+  async getLastSessionEnd(npcId: string, playerName: string): Promise<number | null> {
+    const k = lastSessionKey(npcId, playerName);
+    if (this.lastSessionLoaded.has(k)) return this.lastSessionEnds.get(k) ?? null;
+    const stored = (await this.storage.get<number>(k)) ?? null;
+    this.lastSessionLoaded.add(k);
+    if (stored !== null) this.lastSessionEnds.set(k, stored);
+    return stored;
+  }
+
+  async setLastSessionEnd(npcId: string, playerName: string, at: number): Promise<void> {
+    const k = lastSessionKey(npcId, playerName);
+    this.lastSessionEnds.set(k, at);
+    this.lastSessionLoaded.add(k);
+    await this.storage.put(k, at);
+  }
+
+  // Persona-delta entries that override/supplement the baked persona. The
+  // agent reads these at every session start; they're authoritative when
+  // they conflict with the persona text. Capped at NPC_STATE_CAP entries
+  // (oldest discarded) to keep memoryBlob size bounded.
+  async getNpcState(npcId: string): Promise<NpcStateEntry[]> {
+    const k = npcStateKey(npcId);
+    if (this.npcStateLoaded.has(k)) return this.npcStates.get(k) ?? [];
+    const stored = (await this.storage.get<NpcStateEntry[]>(k)) ?? [];
+    this.npcStateLoaded.add(k);
+    this.npcStates.set(k, stored);
+    return stored;
+  }
+
+  async appendNpcState(npcId: string, entry: NpcStateEntry): Promise<void> {
+    const k = npcStateKey(npcId);
+    const list = await this.getNpcState(npcId);
+    list.push(entry);
+    while (list.length > NPC_STATE_CAP) list.shift();
+    this.npcStates.set(k, list);
+    await this.storage.put(k, list);
+  }
+
+  async clearNpcState(npcId: string): Promise<void> {
+    const k = npcStateKey(npcId);
+    this.npcStates.set(k, []);
+    this.npcStateLoaded.add(k);
+    await this.storage.put(k, []);
+  }
+
+  // Has this static GameChange already been seeded into this room? Dedup
+  // for the onStart seeder so each change applies exactly once per room.
+  async isGameChangeSeeded(id: string): Promise<boolean> {
+    return (await this.storage.get<boolean>(gameChangeSeededKey(id))) === true;
+  }
+
+  async markGameChangeSeeded(id: string): Promise<void> {
+    await this.storage.put(gameChangeSeededKey(id), true);
+  }
+
+  // Has any player ever successfully drunk from the coffee maker in this
+  // room? Once true, the first-drink persona-delta cascade is suppressed —
+  // the discovery has already been written into every NPC's state. Cached
+  // in-memory since the check fires on every drink press (cheap but worth
+  // skipping the storage round-trip).
+  async getCoffeeDiscovered(): Promise<boolean> {
+    if (this.coffeeDiscovered !== null) return this.coffeeDiscovered;
+    const stored = (await this.storage.get<boolean>(COFFEE_DISCOVERED_KEY)) ?? false;
+    this.coffeeDiscovered = stored;
+    return stored;
+  }
+
+  async setCoffeeDiscovered(): Promise<void> {
+    this.coffeeDiscovered = true;
+    await this.storage.put(COFFEE_DISCOVERED_KEY, true);
   }
 
   async listRecentForNpc(

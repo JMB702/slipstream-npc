@@ -1,5 +1,6 @@
 import {
   BOT,
+  COFFEE_NAV_POSITION,
   PLAYER,
   TICK_MS,
   WEAPON,
@@ -8,7 +9,7 @@ import {
   type Vec3,
 } from '@slipstream-npc/shared';
 import type { ServerPlayer } from '../state.js';
-import { applyInput } from '../simulation.js';
+import { applyInput, setPose } from '../simulation.js';
 import { planPath, randomPatrolGoal } from './path.js';
 import { getNavGraph } from './waypoints.js';
 import {
@@ -128,6 +129,37 @@ export const tickBot = (
     bot.botPath = undefined;
     bot.botPathIdx = 0;
   }
+  // Lean-arrival check: if /tools/lean_wall set a target and we've now
+  // pathed to it, snap our facing to the precomputed back-to-wall yaw and
+  // apply the pose. The next tick the inCommittedPose early-return below
+  // freezes us in the lean. Runs BEFORE the committed-pose check so we
+  // can transition into the pose this same tick.
+  if (bot.botLeanTarget) {
+    const dx = bot.position[0] - bot.botLeanTarget.position[0];
+    const dz = bot.position[2] - bot.botLeanTarget.position[2];
+    if (Math.hypot(dx, dz) < BOT.waypointArriveDist) {
+      bot.yaw = bot.botLeanTarget.yaw;
+      setPose(bot, 'lean_wall', null, 0, now);
+      bot.botLeanTarget = null;
+      bot.botPath = undefined;
+      bot.botGoal = null;
+      return false;
+    }
+  }
+
+  // Committed-pose bot — sitting, lying, leaning, dancing. Skip patrol pathing
+  // so the NPC stays where the agent placed it. Casual_idle is the default
+  // for everyone now and is NOT a freeze — a casual NPC still patrols and
+  // walks around, just with relaxed animations. Combat hostility still clears
+  // pose via clearPose() inside the damage path, so a posed bot CAN be
+  // re-engaged without special-casing it here.
+  const inCommittedPose =
+    bot.pose !== null && bot.pose !== 'casual_idle';
+  if (inCommittedPose || bot.poseTransition !== null) {
+    bot.botPath = undefined;
+    bot.botGoal = null;
+    return false;
+  }
 
   const targetCheckDue =
     bot.botLastTargetCheckAt === undefined ||
@@ -182,6 +214,31 @@ export const tickBot = (
     }
   }
 
+  // Resolve agent-driven follow / flee targets. Engage (hostility) always
+  // wins over these — combat takes precedence over a chat-induced follow.
+  const followTarget =
+    bot.botFollowing && bot.botState !== 'engage'
+      ? others.find((p) => p.id === bot.botFollowing && p.alive) ?? null
+      : null;
+  const fleeingActive = bot.botFleeingFrom && bot.botFleeingFrom.until > now;
+  if (bot.botFleeingFrom && !fleeingActive) bot.botFleeingFrom = null;
+  const fleeFrom =
+    fleeingActive && bot.botState !== 'engage'
+      ? others.find((p) => p.id === bot.botFleeingFrom!.id && p.alive) ?? null
+      : null;
+  // Coffee run: lowest-priority agent-driven goal — overridden by engage,
+  // follow, and flee, but supersedes patrol. botGoingForCoffeeUntil is a
+  // wall-clock deadline (Date.now ms); arrival detection + tryDrinkCoffee
+  // invocation + state-clear happens in server.ts:runTick where the
+  // broadcast + alert machinery lives. The controller's only job here is
+  // to make the coffee maker's navigation position the path-planning goal.
+  const coffeeBound =
+    bot.botGoingForCoffeeUntil !== undefined &&
+    Date.now() < bot.botGoingForCoffeeUntil &&
+    bot.botState !== 'engage' &&
+    !followTarget &&
+    !fleeFrom;
+
   // Plan / replan path for non-engage states.
   if (bot.botState !== 'engage') {
     const replanDue =
@@ -191,7 +248,60 @@ export const tickBot = (
       bot.botPath.length === 0;
     if (replanDue) {
       let goal: Vec3 | null = null;
-      if (bot.botState === 'hunt' && bot.botGoal) {
+      if (followTarget) {
+        // Hysteresis follow: discrete HOLD ↔ FOLLOWING states with separate
+        // entry/exit thresholds. Eliminates the "walks backward when player
+        // approaches" bug by NEVER computing a goal-on-the-player→bot-ray:
+        // the goal is always either ft.position (walk to player) or
+        // bot.position (stand still).
+        //
+        //   HOLD → FOLLOWING:  dist > followResumeDist  (~4m)
+        //   FOLLOWING → HOLD:  dist ≤ followStandoffDist  (~2.5m)
+        //   gap between:        whichever sub-state we were in, stay there
+        //
+        // On HOLD → FOLLOWING we also set followHoldUntil so the movement
+        // section suppresses forward motion for a brief window — the bot
+        // turns to face the player FIRST, then walks.
+        const ft = followTarget;
+        const dx = bot.position[0] - ft.position[0];
+        const dz = bot.position[2] - ft.position[2];
+        const dist = Math.hypot(dx, dz);
+        if (bot.botFollowMoving) {
+          if (dist <= BOT.followStandoffDist) {
+            bot.botFollowMoving = false;
+            bot.botFollowHoldUntil = undefined;
+            goal = bot.position;
+          } else {
+            goal = ft.position;
+          }
+        } else {
+          if (dist > BOT.followResumeDist) {
+            bot.botFollowMoving = true;
+            bot.botFollowHoldUntil = now + BOT.followResumeDelayMs;
+            goal = ft.position;
+          } else {
+            goal = bot.position;
+          }
+        }
+      } else if (fleeFrom) {
+        // Flee: pick a node opposite the fleeing-from player.
+        const ff = fleeFrom;
+        const dx = bot.position[0] - ff.position[0];
+        const dz = bot.position[2] - ff.position[2];
+        const len = Math.hypot(dx, dz) || 1;
+        const norm: Vec3 = [
+          bot.position[0] + (dx / len) * 15,
+          bot.position[1],
+          bot.position[2] + (dz / len) * 15,
+        ];
+        goal = norm;
+      } else if (bot.botLeanTarget) {
+        // Walk to the precomputed lean spot. On arrival the top-of-tick
+        // check applies pose='lean_wall' and clears this field.
+        goal = bot.botLeanTarget.position;
+      } else if (coffeeBound) {
+        goal = COFFEE_NAV_POSITION;
+      } else if (bot.botState === 'hunt' && bot.botGoal) {
         goal = bot.botGoal;
       } else if (bot.botGoal) {
         goal = bot.botGoal;
@@ -203,12 +313,34 @@ export const tickBot = (
       }
       bot.botGoal = goal;
       const path = planPath(bot.position, goal);
-      bot.botPath = path ?? [goal];
-      bot.botPathIdx = 0;
+      if (path === null) {
+        // No route to this goal — drop it and let the next tick pick a new
+        // one. Steering toward an unreachable point just wedges the bot.
+        bot.botGoal = null;
+        bot.botPath = undefined;
+        bot.botPathIdx = 0;
+      } else {
+        bot.botPath = path;
+        bot.botPathIdx = 0;
+      }
       bot.botLastReplanAt = now;
     }
     advancePathIfArrived(bot);
   }
+
+  // Voice-conversation freeze: if a player has an active ConvAI session
+  // with this NPC and the NPC is not in engage AND not actively following
+  // or fleeing or coffee-bound (those tools are themselves conversation
+  // outputs), the NPC freezes and faces the player. Movement tools
+  // override the freeze because the conversation just asked the NPC to MOVE.
+  const conversingWith =
+    bot.botConversationWith &&
+    bot.botState !== 'engage' &&
+    !followTarget &&
+    !fleeFrom &&
+    !coffeeBound
+      ? others.find((p) => p.id === bot.botConversationWith && p.alive) ?? null
+      : null;
 
   // Compute desired facing direction.
   let desiredYaw = bot.yaw;
@@ -217,6 +349,10 @@ export const tickBot = (
     const aim = yawPitchToward(eyePosition(bot), eyePosition(target));
     desiredYaw = aim.yaw + jitter(profile.aimJitterRad);
     desiredPitch = aim.pitch + jitter(profile.aimJitterRad);
+  } else if (conversingWith) {
+    const aim = yawPitchToward(eyePosition(bot), eyePosition(conversingWith));
+    desiredYaw = aim.yaw;
+    desiredPitch = aim.pitch;
   } else {
     const next = currentWaypoint(bot);
     if (next) {
@@ -263,12 +399,44 @@ export const tickBot = (
     const next = currentWaypoint(bot);
     if (next) {
       const distToWaypoint = horizDist(bot.position, next);
-      sprint = distToWaypoint > BOT.sprintWhenFurtherThan;
+      // Force-sprint overrides the distance gate so /tools/sprint_patrol
+      // makes the bot sprint between every waypoint, not just far ones.
+      // Doesn't apply to lean — sprinting into a wall mid-lean reads as
+      // chaotic. Doesn't apply to follow — already governed by its own
+      // state machine.
+      sprint =
+        bot.botForceSprint === true && !bot.botLeanTarget && !followTarget
+          ? true
+          : distToWaypoint > BOT.sprintWhenFurtherThan;
       const dir = subtract(next, bot.position);
       const fr = decomposeMovement(dir, yaw);
       forward = clamp(fr.forward, -1, 1);
       right = clamp(fr.right, -1, 1);
     }
+  }
+
+  // Conversation override wins over patrol movement (but not over engage —
+  // hostility-driven combat already took precedence above).
+  if (conversingWith) {
+    forward = 0;
+    right = 0;
+    sprint = false;
+    jump = false;
+  }
+
+  // Follow turn-first delay: when transitioning HOLD → FOLLOWING the replan
+  // block sets botFollowHoldUntil. Until it expires, suppress forward motion
+  // so the bot rotates toward the player (yaw slew still runs because the
+  // goal/path are already in place), then starts walking. Doesn't apply
+  // during engage — combat overrides this window.
+  if (
+    bot.botState !== 'engage' &&
+    bot.botFollowHoldUntil !== undefined &&
+    now < bot.botFollowHoldUntil
+  ) {
+    forward = 0;
+    right = 0;
+    sprint = false;
   }
 
   // Stuck detection: if we're meant to be moving and we're crawling, jump and
@@ -338,6 +506,7 @@ export const tickBot = (
     sprint: sprint && !fire,
     fire,
     reload: wantsReload,
+    interact: false,
     yaw,
     pitch,
     // Bots don't have a camera; server falls back to eye + yaw/pitch when

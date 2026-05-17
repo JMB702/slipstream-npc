@@ -1,7 +1,7 @@
 import { Billboard, Text } from '@react-three/drei';
 import { useFrame } from '@react-three/fiber';
 import { Suspense, useState } from 'react';
-import { PLAYER, type CharacterId, type PlayerId, type Vec3 } from '@slipstream-npc/shared';
+import { PLAYER, type CharacterId, type PlayerId, type Pose, type PoseTransition, type Vec3 } from '@slipstream-npc/shared';
 import { Character } from './Character.js';
 import { getLastAimedAt } from './aim-state.js';
 import { useGame } from '../store.js';
@@ -21,8 +21,35 @@ interface Props {
   playerId: PlayerId | null;
   isBot?: boolean;
   isFriend?: boolean;
+  voiceIcon?: 'mic' | 'speaker' | null;
   characterId?: CharacterId;
+  pose?: Pose;
+  poseTransition?: PoseTransition;
+  danceVariant?: number;
 }
+
+// Persistent "AI" badge that floats above every bot/NPC. Required by
+// ElevenLabs' Disclosure Requirements: end users must be informed they're
+// interacting with AI, not a human. The ConsentGate covers the upfront
+// notice; this badge is the persistent-banner layer so the AI status stays
+// visible during gameplay (and in screenshots / streams).
+const AiBadge = () => (
+  <group position={[0, 0.5, 0]}>
+    <mesh>
+      <planeGeometry args={[0.36, 0.16]} />
+      <meshBasicMaterial color="#000000" transparent opacity={0.65} />
+    </mesh>
+    <Text
+      position={[0, 0, 0.002]}
+      fontSize={0.1}
+      color="#7aa8ff"
+      outlineWidth={0.008}
+      outlineColor="black"
+    >
+      AI
+    </Text>
+  </group>
+);
 
 export const PlayerModel = ({
   name,
@@ -33,8 +60,13 @@ export const PlayerModel = ({
   reloading,
   vaulting,
   playerId,
+  isBot,
   isFriend,
+  voiceIcon,
   characterId,
+  pose,
+  poseTransition,
+  danceVariant,
 }: Props) => {
   const myId = useGame((s) => s.myId);
   const isSelf = playerId !== null && playerId === myId;
@@ -50,14 +82,41 @@ export const PlayerModel = ({
           alive={alive}
           playerId={playerId}
           characterId={characterId}
+          pose={pose}
+          poseTransition={poseTransition}
+          danceVariant={danceVariant}
         />
       </Suspense>
       {alive && (
         <Billboard position={[0, PLAYER.height / 2 + 0.35, 0]}>
+          {isBot && <AiBadge />}
           {showsName && <EnemyNameLabel name={name} isFriend={!!isFriend} playerId={playerId} />}
+          {voiceIcon && <VoiceGlyph kind={voiceIcon} />}
           {health < PLAYER.maxHealth && <NameplateHealthBar health={health} />}
         </Billboard>
       )}
+    </group>
+  );
+};
+
+const VoiceGlyph = ({ kind }: { kind: 'mic' | 'speaker' }) => {
+  const color = kind === 'speaker' ? '#5fff8f' : '#3a7afe';
+  const glyph = kind === 'speaker' ? '🔊' : '🎤';
+  return (
+    <group position={[0, 0.28, 0]}>
+      <mesh>
+        <circleGeometry args={[0.13, 24]} />
+        <meshBasicMaterial color="#000000" transparent opacity={0.6} />
+      </mesh>
+      <Text
+        position={[0, 0, 0.002]}
+        fontSize={0.16}
+        color={color}
+        outlineWidth={0.01}
+        outlineColor="black"
+      >
+        {glyph}
+      </Text>
     </group>
   );
 };

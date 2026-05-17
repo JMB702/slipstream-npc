@@ -8,6 +8,8 @@ import { Minimap } from './ui/Minimap.js';
 import { Scoreboard } from './ui/Scoreboard.js';
 import { ConsentGate, getStoredConsent } from './ui/ConsentGate.js';
 import { MuteIndicator } from './ui/MuteIndicator.js';
+import { SpeakerHUD } from './ui/SpeakerHUD.js';
+import { VoiceDebug } from './ui/VoiceDebug.js';
 import { installVoiceManager, teardownVoiceManager } from './voice/manager.js';
 import { installMuteControls } from './voice/mute.js';
 import { useGame } from './store.js';
@@ -29,6 +31,7 @@ export const App = () => {
     accessCode,
     botCount,
     botDifficulty,
+    npcIds,
   }: {
     name: string;
     mapId: MapId;
@@ -36,10 +39,11 @@ export const App = () => {
     accessCode: string;
     botCount: number;
     botDifficulty: BotDifficulty;
+    npcIds: string[];
   }) => {
     setActiveMap(mapId);
     useGame.getState().setActiveMapId(mapId);
-    const c = connect(mapId, name, killTarget, accessCode, botCount, botDifficulty);
+    const c = connect(mapId, name, killTarget, accessCode, botCount, botDifficulty, npcIds);
     installVoiceManager({ send: c.send, myName: name });
     setClient(c);
     setName(name);
@@ -70,6 +74,8 @@ export const App = () => {
       <Minimap />
       <Scoreboard />
       <MuteIndicator />
+      <SpeakerHUD />
+      <VoiceDebug />
       <button onClick={onLeave} style={leaveBtn}>
         Leave
       </button>

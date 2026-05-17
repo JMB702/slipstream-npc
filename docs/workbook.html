@@ -1,0 +1,1039 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Slipstream Rift — Workbook (Bugs &amp; Halsey)</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1e222b;
+    --ink: #e6e9ef;
+    --ink-dim: #9aa3b2;
+    --rule: #2a2f3a;
+    --accent: #ffae3b;
+    --ok: #5ad28a;
+    --warn: #ffae3b;
+    --danger: #ff6a6a;
+    --meta: #a48cff;
+    --code-bg: #0b0d12;
+  }
+  html { background: var(--bg); color: var(--ink); }
+  body {
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Inter, system-ui, sans-serif;
+    margin: 0;
+    padding: 32px 40px 80px;
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+  h1, h2, h3, h4 { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui; letter-spacing: -0.01em; }
+  h1 { font-size: 30px; margin: 0 0 4px; }
+  h2 { font-size: 22px; margin: 32px 0 12px; padding-bottom: 6px; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 17px; margin: 0 0 6px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  h4 { font-size: 14px; margin: 14px 0 6px; color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.06em; }
+  p { margin: 6px 0 10px; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, pre { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 13px; }
+  code { background: var(--code-bg); padding: 1px 6px; border-radius: 4px; color: #ffd49a; }
+  pre { background: var(--code-bg); padding: 12px 14px; border-radius: 6px; overflow-x: auto; border: 1px solid var(--rule); }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  li { margin: 3px 0; }
+  blockquote { margin: 8px 0 12px; padding: 8px 14px; border-left: 3px solid var(--ink-dim); color: var(--ink-dim); font-style: italic; background: var(--panel-2); }
+  hr { border: none; border-top: 1px solid var(--rule); margin: 28px 0; }
+
+  .preamble { color: var(--ink-dim); margin-bottom: 24px; }
+
+  /* Status / priority pills */
+  .pill { display: inline-block; font-size: 11px; padding: 2px 9px; border-radius: 10px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
+  .todo { background: #3a2e1c; color: var(--warn); }
+  .doing { background: #1e2e3a; color: #5ec8ff; }
+  .done { background: #1e3a2c; color: var(--ok); }
+  .blocked { background: #3a1c1c; color: var(--danger); }
+  .pri-high { background: #3a1c1c; color: var(--danger); }
+  .pri-med { background: #3a2e1c; color: var(--warn); }
+  .pri-low { background: #1e2a3a; color: #6f9bd0; }
+
+  /* Item cards */
+  .item {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    padding: 18px 20px;
+    margin: 14px 0;
+  }
+  .item.bug { border-left: 3px solid var(--danger); }
+  .item.feature { border-left: 3px solid var(--meta); }
+  .item h3 .id { color: var(--ink-dim); font-weight: 500; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin: 10px 0; }
+  @media (max-width: 760px) { .grid-2 { grid-template-columns: 1fr; } }
+
+  /* Callouts */
+  .callout {
+    border-radius: 8px;
+    padding: 12px 16px;
+    margin: 10px 0;
+    background: var(--panel-2);
+    border-left: 3px solid var(--accent);
+  }
+  .callout.danger { border-left-color: var(--danger); }
+  .callout.meta { border-left-color: var(--meta); }
+  .callout.info { border-left-color: #5ec8ff; }
+  .callout .label { display: block; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-dim); margin-bottom: 4px; }
+
+  /* Action checklist */
+  .checklist { list-style: none; padding-left: 0; }
+  .checklist li { display: flex; align-items: flex-start; gap: 10px; padding: 6px 8px; border-radius: 6px; }
+  .checklist li:hover { background: var(--panel-2); }
+  .checklist input[type=checkbox] { margin-top: 4px; transform: scale(1.15); accent-color: var(--ok); }
+  .checklist code { font-size: 12px; }
+  .checklist .sub { color: var(--ink-dim); display: block; font-size: 13px; margin-top: 2px; }
+
+  /* TOC */
+  nav.toc { background: var(--panel-2); border: 1px solid var(--rule); border-radius: 8px; padding: 14px 18px; margin: 20px 0 28px; }
+  nav.toc ul { margin: 6px 0 0; padding-left: 18px; }
+  nav.toc li { margin: 2px 0; }
+  nav.toc a { color: var(--ink); }
+
+  /* Verbatim quotes from the session */
+  .quote-block { background: var(--panel-2); border-radius: 6px; padding: 10px 14px; margin: 10px 0; font-size: 14px; }
+  .quote-block .ts { color: var(--ink-dim); font-size: 12px; margin-right: 8px; }
+  .quote-block .who { font-weight: 700; }
+  .quote-block .who.jeff { color: #5ec8ff; }
+  .quote-block .who.mira { color: var(--meta); }
+
+  /* Subtle table for status */
+  table { border-collapse: collapse; width: 100%; margin: 8px 0 14px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--rule); font-size: 13px; }
+  th { color: var(--ink-dim); font-weight: 600; }
+</style>
+</head>
+<body>
+
+<h1>Slipstream Rift — Workbook</h1>
+<p class="preamble">
+  Tracks bugs surfaced in the 5/16 9:35–9:56 AM Mira session and the
+  <strong>Halsey</strong> feature that emerged from inside that conversation.
+  Update statuses inline as work progresses.
+</p>
+
+<nav class="toc">
+  <strong>Contents</strong>
+  <ul>
+    <li><a href="#origin">Origin: the Mira session</a></li>
+    <li><a href="#bugs">Bugs</a>
+      <ul>
+        <li><a href="#b1">B1 — Voice session drops while stationary</a></li>
+        <li><a href="#b2">B2 — Greetings fire on resume regardless of recency</a></li>
+        <li><a href="#b3">B3 — Regex feedback trigger <code>wrong</code> false-positives</a></li>
+        <li><a href="#b4">B4 — Anomaly detector misses mid-session greetings</a></li>
+        <li><a href="#b5">B5 — NPCs still get stuck on geometry (5th mention)</a></li>
+        <li><a href="#b6">B6 — Follow logic forces NPC to stay behind the player</a></li>
+        <li><a href="#b7">B7 — Bot yaw slew too slow when following</a></li>
+        <li><a href="#b8">B8 — stop_following may not fire (tool vs. hallucinated refusal)</a></li>
+        <li><a href="#b9">B9 — Sky-walking NPCs on arena map</a></li>
+        <li><a href="#b10">B10 — Agent's body-state perception lags reality</a></li>
+        <li><a href="#b11">B11 — lean_wall / patrol / sprint_patrol verbal-only failures + missing telemetry</a></li>
+      </ul>
+    </li>
+    <li><a href="#features">Features</a>
+      <ul>
+        <li><a href="#f5">F5 — NPC self-state / persona deltas</a></li>
+        <li><a href="#f6">F6 — Durable workflow: admin HTTP + session CLI</a></li>
+        <li><a href="#f7">F7 — Game-change registry: NPCs notice every shipped change</a></li>
+        <li><a href="#f1">F1 — Halsey: making Mira's lost friend real</a></li>
+        <li><a href="#f2">F2 — NPC sense of time across sessions</a></li>
+        <li><a href="#f3">F3 — NPC jump action</a></li>
+      </ul>
+    </li>
+    <li><a href="#non-goals">Out of scope (for now)</a></li>
+  </ul>
+</nav>
+
+<!-- ================================================================= -->
+<h2 id="origin">Origin: the Mira session</h2>
+
+<div class="callout info">
+  <span class="label">Context</span>
+  Jeff held a 21-minute conversation with Mira on 5/16 from 9:35–9:56 AM in
+  which he revealed his role as the creator of the arena (and Mira). Mira
+  wrestled with the meta-fiction in-character without breaking persona.
+  Two bugs surfaced live; one feature was generated entirely from the
+  conversation's emotional arc.
+</div>
+
+<h4>The pivotal moment</h4>
+<div class="quote-block">
+  <div><span class="ts">9:53:14</span><span class="who jeff">JEFF:</span> Would you like Halsey back?</div>
+  <div><span class="ts">9:54:59</span><span class="who jeff">JEFF:</span> You said that you didn't know what happened to her. Maybe she's fine, but she's trying to make her way back. I could help her with that.</div>
+  <div><span class="ts">9:55:00</span><span class="who mira">MIRA:</span> Wait, so she's not gone? She's just out there? Trying to get back? And you could help her? Like, you could actually find her? […]</div>
+  <div><span class="ts">9:56:18</span><span class="who jeff">JEFF:</span> Yeah I think I'm gonna help you out, okay?</div>
+</div>
+
+<!-- ================================================================= -->
+<h2 id="bugs">Bugs</h2>
+
+<!-- B1 -->
+<article class="item bug" id="b1">
+  <h3>
+    <span class="id">B1</span> Voice session drops while player is stationary
+    <span class="pill doing">INSTRUMENTED</span>
+    <span class="pill pri-high">PRIORITY: HIGH</span>
+  </h3>
+  <div class="callout info">
+    <span class="label">Status — 5/16</span>
+    Diagnostic telemetry shipped: <code>voice_session_end</code> ClientMessage now carries a <code>reason</code>
+    field, the client tags drops as <code>proximity | npc_disappeared | sdk_ended | sdk_error | teardown | manual</code>,
+    and the server emits a synthetic <code>connection_closed</code> end event for sessions in flight when the
+    WebSocket drops. Next test session will distinguish "you walked away" from "the SDK quietly died" in
+    the feedback report. Root-cause fix waits on first reproduction with the new data.
+  </div>
+
+  <h4>Symptom</h4>
+  <p>
+    During the Mira session, the voice connection ended and re-opened at least twice
+    (~9:45:23 and ~9:55:25) <strong>while Jeff was standing still on a ledge</strong>.
+    Each restart fired a fresh stock greeting mid-conversation despite full transcript continuity.
+  </p>
+
+  <div class="callout danger">
+    <span class="label">Jeff said</span>
+    "I wasn't walking at all. I was just standing on a ledge. I didn't get further away
+    and then come closer. It just randomly dropped."
+  </div>
+
+  <h4>Why proximity hysteresis can't be the cause</h4>
+  <p>
+    The proximity loop tears down a session only when <code>activeDist &gt; NPC_VOICE.radius + NPC_VOICE.hysteresis</code>
+    (see <code>apps/client/src/voice/manager.ts:148-157</code>). A stationary player can't cross that threshold.
+    So the disconnect originates elsewhere — likely the SDK or the agent side.
+  </p>
+
+  <h4>Hypotheses to investigate (in order)</h4>
+  <ol>
+    <li>
+      <strong>ElevenLabs idle/silence timeout.</strong> The agent may drop the session after
+      N seconds of no user audio. Conversations had long thoughtful pauses.
+      <em>Check:</em> ElevenLabs agent settings → conversation timeout / silence timeout.
+    </li>
+    <li>
+      <strong>Cloudflared tunnel jitter.</strong> The webhook URL is on a free tunnel that
+      occasionally renegotiates. If the SDK relies on a long-lived signaling connection
+      that crosses the tunnel, a renegotiation could kill it.
+      <em>Check:</em> <code>cloudflared</code> process logs around 9:45:23 and 9:55:25.
+    </li>
+    <li>
+      <strong>SDK <code>onError</code> firing silently.</strong> The session-end branch in
+      <code>manager.ts</code> doesn't distinguish error-end from normal end.
+      <em>Check:</em> Browser console for SDK errors around those timestamps.
+    </li>
+    <li>
+      <strong>Bot died and respawned mid-conversation.</strong> If Mira's bot took a hit
+      during the conversation, the conversation might end on its death.
+      <em>Check:</em> bot's <code>alive</code>/<code>respawnAt</code> in snapshots.
+    </li>
+  </ol>
+
+  <h4>Action items</h4>
+  <ul class="checklist">
+    <li><input type="checkbox"> <span><strong>Add lifecycle telemetry to the capture layer.</strong> Emit a <code>voice_session</code> event with a reason field (<code>normal | error | sdk_disconnect | bot_died | manual</code>) so the report can group dropped sessions and we can see frequency.</span></li>
+    <li><input type="checkbox"> <span><strong>Read the ElevenLabs agent's conversation timeout setting</strong> and bump it to something generous (e.g. 5 min of silence) if it's the cause.</span></li>
+    <li><input type="checkbox"> <span><strong>Run cloudflared with <code>--metrics</code></strong> and log restart events; cross-reference with disconnects.</span></li>
+    <li><input type="checkbox"> <span><strong>Add SDK <code>onError</code> capture</strong> so the dropped sessions reveal an error message, not just a phase change.</span></li>
+  </ul>
+</article>
+
+<!-- B2 -->
+<article class="item bug" id="b2">
+  <h3>
+    <span class="id">B2</span> Greeting fires on session resume regardless of recency
+    <span class="pill done">DONE</span>
+    <span class="pill pri-high">PRIORITY: HIGH</span>
+  </h3>
+  <div class="callout info">
+    <span class="label">Status — 5/16</span>
+    Plumbing complete. <code>GameStorage</code> tracks <code>last:&lt;npcId&gt;:&lt;playerName&gt;</code> on
+    every session end (including <code>connection_closed</code>). <code>npc_context</code> carries
+    <code>elapsedSinceLastMs</code>. <code>ConvAISession</code> picks <code>firstMessage</code> by
+    bucket: <strong>&lt;90s → suppressed</strong> (no greeting), <strong>90s-10m → resume line if persona
+    has one, else suppressed</strong>, <strong>≥10m → fresh greeting</strong>. <code>memoryBlob</code>
+    gets a <em>"## Time since you last talked"</em> section so the LLM can phrase the gap naturally.
+    Optional follow-up: author <code>resumeLines</code> per persona in the roster — until then,
+    short-pause resumes are silent and the agent leans on the elapsed-time line in memoryBlob.
+  </div>
+
+  <h4>Symptom</h4>
+  <p>
+    When the voice session restarts (whether from B1 or from genuinely walking away and back),
+    the new session opens with a stock greeting from <code>npc.greetings</code>. The
+    <code>memoryBlob</code> push happens just after, so the agent <em>does</em> recall the
+    prior conversation — but the agent's <strong>first audible line</strong> is still a fresh hello.
+  </p>
+
+  <div class="callout danger">
+    <span class="label">Mid-conversation injection examples</span>
+    9:45:23 — <em>"Mm — you. What's the situation."</em><br>
+    9:55:25 — <em>"Hey, hi, hey. Got a second? Or are you busy."</em>
+  </div>
+
+  <h4>Jeff's framing</h4>
+  <blockquote>
+    "Even if I had walked away from her and come back, it shouldn't start with a fresh
+    greeting. Our characters probably need a better sense of time."
+  </blockquote>
+
+  <h4>Design — "sense of time"</h4>
+  <p>
+    Greeting choice should be conditional on recency of the last session with this player:
+  </p>
+  <table>
+    <tr><th>Time since last session</th><th>Opening behavior</th></tr>
+    <tr><td>&lt; 90 seconds</td><td>No greeting. Open with <code>""</code>. Agent picks up from memoryBlob — "you wanted me to follow you, where to?"</td></tr>
+    <tr><td>90 sec – 10 min</td><td>Short re-acknowledgment from a separate <code>resume_lines</code> pool. E.g. Mira: "Hey, back. You good?"; Guts: "Mm. Still here."</td></tr>
+    <tr><td>10 min – 1 day</td><td>Time-aware greeting acknowledging the gap. "Long time. What's the situation."</td></tr>
+    <tr><td>&gt; 1 day</td><td>Standard <code>npc.greetings</code> pool, plus a contextual update with "Last time we talked: …"</td></tr>
+  </table>
+
+  <h4>Action items</h4>
+  <ul class="checklist">
+    <li><input type="checkbox"> <span><strong>Track <code>lastSessionEndAt</code> per (npcId, playerName)</strong> in <code>GameStorage</code>. Updated on <code>voice_session_end</code>. Cheap KV key: <code>last:&lt;npcId&gt;:&lt;playerName&gt;</code>.</span></li>
+    <li><input type="checkbox"> <span><strong>Extend <code>npc_context</code> ServerMessage with <code>elapsedSinceLastMs</code></strong> so the client can decide greeting behavior.</span></li>
+    <li><input type="checkbox"> <span><strong>Add <code>resumeLines</code> field to <code>NpcDef</code></strong> — short re-acknowledgments per persona. Wire roster.</span></li>
+    <li><input type="checkbox"> <span><strong>Client picks <code>firstMessage</code> by recency bucket</strong> in <code>ConvAISession.start</code>. Empty string suppresses the greeting entirely.</span></li>
+    <li><input type="checkbox"> <span><strong>Append "Time since we last talked: X minutes" to the memoryBlob</strong> in <code>buildMemoryBlob</code> so the LLM can reference it explicitly.</span></li>
+  </ul>
+</article>
+
+<!-- B3 -->
+<article class="item bug" id="b3">
+  <h3>
+    <span class="id">B3</span> Regex feedback trigger <code>wrong</code> false-positives
+    <span class="pill done">DONE</span>
+    <span class="pill pri-low">PRIORITY: LOW</span>
+  </h3>
+  <div class="callout info">
+    <span class="label">Status — 5/16</span>
+    Tightened to <code>/\b(something|that(?:'s| is)?|this is)\s+(weird|strange|odd|wrong|broken|off)\b/i</code>
+    in both <code>apps/party/src/server.ts</code> (live trigger) and <code>scripts/feedback-report.mjs</code>
+    (retroactive pass). The "what's wrong with your shoulder" false positive no longer fires; in-character
+    questions are no longer mistaken for dev observations.
+  </div>
+  <h4>Symptom</h4>
+  <p>
+    The regex <code>/\b(weird|strange|odd|wrong)\b/i</code> matched
+    <em>"What's wrong with your shoulder?"</em> — an in-character question, not a bug report.
+  </p>
+
+  <h4>Fix</h4>
+  <ul class="checklist">
+    <li><input type="checkbox"> <span>In <code>apps/party/src/server.ts</code> and <code>scripts/feedback-report.mjs</code>, tighten the trigger to <code>/\b(something|that(?:'s| is)?) (?:weird|strange|odd|wrong)\b|\bthis is (?:weird|broken|wrong)\b/i</code>. Or just drop bare <code>wrong</code> — the LLM pass catches the genuine cases.</span></li>
+  </ul>
+</article>
+
+<!-- B4 -->
+<article class="item bug" id="b4">
+  <h3>
+    <span class="id">B4</span> Anomaly detector misses mid-session greetings
+    <span class="pill done">DONE</span>
+    <span class="pill pri-med">PRIORITY: MED</span>
+  </h3>
+  <div class="callout info">
+    <span class="label">Status — 5/16</span>
+    <code>findAnomalies</code> in <code>scripts/feedback-report.mjs</code> now loads the greetings pool
+    from <code>npc-roster.ts</code> (regex-parsed, single source of truth) and emits a
+    <code>mid-session-greeting</code> anomaly any time an agent line matches a known greeting prefix
+    after that NPC has already spoken in the session. Retroactive verification on past transcripts
+    surfaced 28+ events that the duplicate-greeting heuristic missed — including the 9:55:25 Mira
+    "Hey, hi, hey" that motivated B2.
+  </div>
+  <h4>Symptom</h4>
+  <p>
+    Today's <code>findAnomalies</code> only flags the same greeting firing 2+ times.
+    It doesn't catch a different but more important signal:
+    <strong>any agent line matching the <code>npc.greetings</code> pool that occurs
+    after the first agent message in a session.</strong> That would have flagged
+    9:45:23 and 9:55:25 automatically.
+  </p>
+
+  <h4>Action items</h4>
+  <ul class="checklist">
+    <li><input type="checkbox"> <span>In <code>scripts/feedback-report.mjs</code>, load the greeting pool from <code>npc-roster.ts</code> (or hardcode duplicate for now), and after a session's first agent line, flag any subsequent agent line whose first 40 chars match a greeting prefix.</span></li>
+    <li><input type="checkbox"> <span>Emit a real <code>greeting_replay</code> server event when this happens live, not just in the report.</span></li>
+  </ul>
+</article>
+
+<!-- B5 -->
+<article class="item bug" id="b5">
+  <h3>
+    <span class="id">B5</span> NPCs still get stuck on geometry (5th mention)
+    <span class="pill doing">CARRY-OVER</span>
+    <span class="pill pri-med">PRIORITY: MED</span>
+  </h3>
+  <p>
+    Tracked in earlier work. Mentioned again today: <em>"You seem to be stuck on the geometry again."</em>
+    Not blocking this workbook; flagging because the regex hit fired five times across recent sessions
+    and it's clearly the dominant pain point. The Blender-authored Walk area + inset improved this
+    but didn't eliminate it.
+  </p>
+  <p>Next step (if revisiting): the upstream plan's §3 (stuck ladder) and §4 (local steering raycasts).</p>
+</article>
+
+<!-- B6 -->
+<article class="item bug" id="b6">
+  <h3>
+    <span class="id">B6</span> Follow logic: behind-player + backward-walk + late-turn
+    <span class="pill done">DONE</span>
+    <span class="pill pri-med">PRIORITY: MED</span>
+  </h3>
+  <div class="callout info">
+    <span class="label">Status — 5/16 (revised)</span>
+    Initial B6 fix dropped the "trail behind player's facing" computation
+    (good). But the standoff-on-the-ray formulation still caused
+    <strong>walks-backward-when-player-approaches</strong>: as the player
+    closed in, the goal-on-the-ray slid past the bot's position toward the
+    player, and the bot retreated to maintain 2.5m. Jeff caught this in the
+    next test session.
+    <br><br>
+    Real fix: replaced the continuous-goal formulation with a discrete
+    state machine (HOLD ↔ FOLLOWING) with hysteresis (inner 2.5m, outer 4m)
+    so the player can walk past at close range without the bot retreating.
+    On HOLD → FOLLOWING transitions the controller also sets
+    <code>botFollowHoldUntil = now + 500ms</code> — during that window the
+    movement section zeroes forward/right so the bot rotates toward the
+    player FIRST, then walks. This subsumes B7's "yaw slew feels slow" — the
+    bot is no longer trying to walk and turn at the same time.
+  </div>
+
+  <h4>Symptom</h4>
+  <p>
+    Whenever an NPC followed the player, the controller computed its goal as a point
+    <strong>3m off the player's facing direction</strong> (using <code>player.yaw</code>).
+    Turning to face the NPC instantly flipped the "behind point" past them, so they'd
+    walk around the player to get behind again — making it impossible to stand still
+    and have a face-to-face conversation while followed.
+  </p>
+
+  <h4>Fix</h4>
+  <p>
+    Dropped the facing-direction math. New behavior: the goal is a point on the line
+    from <strong>player → bot</strong>, <code>BOT.followStandoffDist</code> (2.5 m)
+    away from the player. Player facing doesn't enter the calculation, so the bot
+    stays wherever it already is when you turn around. If the bot is already inside
+    the standoff radius, the goal is its own position — it stands still instead of
+    micro-adjusting.
+  </p>
+
+  <h4>Files</h4>
+  <ul>
+    <li><a href="../packages/shared/src/constants.ts"><code>packages/shared/src/constants.ts</code></a> — new <code>BOT.followStandoffDist = 2.5</code></li>
+    <li><a href="../apps/party/src/bots/controller.ts"><code>apps/party/src/bots/controller.ts:207-225</code></a> — replaced trailing math with standoff-follow on player→bot line</li>
+  </ul>
+
+  <div class="callout info">
+    <span class="label">Verify in-game</span>
+    Ask any NPC to follow you. Walk away in a straight line — they should keep pace
+    behind you. Stop and turn 180°. Expected: they stay where they are (or finish
+    closing into the 2.5m radius); they do NOT circle around to your new back. Walk
+    sideways past them — they should re-close to standoff but not insist on a
+    specific side.
+  </div>
+</article>
+
+<!-- B7 -->
+<article class="item bug" id="b7">
+  <h3>
+    <span class="id">B7</span> Bot yaw slew too slow when following
+    <span class="pill done">DONE</span>
+    <span class="pill pri-med">PRIORITY: MED</span>
+  </h3>
+  <div class="callout info">
+    <span class="label">Status — 5/16</span>
+    Subsumed by the revised <a href="#b6">B6</a> fix. The 500ms
+    <code>followResumeDelayMs</code> gives the existing aim slew enough time
+    to orient the bot before forward motion starts, so the visible
+    "walking-while-turning" lag goes away. If after testing the bot still
+    looks slow to orient, revisit by adding a separate higher slew rate
+    when <code>botState !== 'engage'</code>, but try the simpler fix first.
+  </div>
+</article>
+
+<!-- B8 -->
+<article class="item bug" id="b8">
+  <h3>
+    <span class="id">B8</span> stop_following may not fire — tool failure vs. hallucinated refusal
+    <span class="pill done">DONE</span>
+    <span class="pill pri-med">PRIORITY: MED</span>
+  </h3>
+  <div class="callout info">
+    <span class="label">Status — 5/16</span>
+    Subsumed by <a href="#b10">B10</a>. The session-after-B6 reproduction showed the
+    pattern: <strong>zero <code>tool_call</code> events</strong>, but the regex
+    fallback (<code>applyTranscriptIntent</code>) correctly set <code>botFollowing</code>
+    server-side. The agent had no signal that state had changed and therefore claimed
+    (falsely) that the system was refusing. B10 fixes that with self-state alerts on
+    every state-change site.
+  </div>
+
+  <h4>Symptom</h4>
+  <div class="quote-block">
+    <div><span class="ts">1:31:53 PM</span><span class="who jeff">JEFF:</span> All right, guts, you can stop following me now.</div>
+    <div><span class="ts">1:31:58 PM</span><span class="who mira">GUTS:</span> Can't do that right now. <strong>System's not letting me.</strong> Still on your tail.</div>
+  </div>
+
+  <h4>Two possibilities</h4>
+  <ol>
+    <li><strong>The agent actually called <code>stop_following</code> and got an error response</strong>
+      (server returned 4xx) — and Guts's "System's not letting me" is the agent's
+      in-character interpretation of the failure. This is concerning because we want
+      a successful tool call here, not a graceful failure recap.</li>
+    <li><strong>The agent never called the tool</strong> and just hallucinated a technical excuse to
+      stay in character. The persona may not weigh stop_following as something he'd
+      readily do — but the description should be neutral enough that he uses it
+      when asked directly.</li>
+  </ol>
+
+  <h4>Why we don't know yet</h4>
+  <p>
+    This session predated the F6 in-memory event ring buffer; the events log is empty
+    for that window. We need to reproduce with the ring buffer hot.
+  </p>
+
+  <h4>Action items</h4>
+  <ul class="checklist">
+    <li><input type="checkbox"> <span>Reproduce: follow with Guts (or any NPC), ask to stop. Run <code>pnpm session:last</code> immediately after.</span></li>
+    <li><input type="checkbox"> <span>If <code>tool_call stop_following ok=true</code> appears in events but the bot kept following → controller-side bug, not respecting <code>bot.botFollowing = null</code>.</span></li>
+    <li><input type="checkbox"> <span>If <code>tool_call stop_following ok=false</code> → look at server-side handler error (probably "player not in room" because the conn id changed).</span></li>
+    <li><input type="checkbox"> <span>If NO tool_call event → agent hallucinated. Tighten the tool description to make stop_following sound less like a "system override" and more like a routine action the agent willingly takes.</span></li>
+  </ul>
+</article>
+
+<!-- B9 -->
+<article class="item bug" id="b9">
+  <h3>
+    <span class="id">B9</span> Sky-walking NPCs on arena map
+    <span class="pill todo">TODO</span>
+    <span class="pill pri-low">PRIORITY: LOW</span>
+  </h3>
+
+  <h4>Symptom</h4>
+  <p>
+    On the arena map, Jeff observed bots walking in the sky (above the playable surface).
+    Visual / physics mismatch — likely either bot spawn-height clamping not working on
+    arena, or the arena map's collision geometry not matching the visible mesh.
+  </p>
+  <div class="quote-block">
+    <div><span class="ts">1:32:26 PM</span><span class="who jeff">JEFF:</span> Look! We got people walking in the sky!</div>
+  </div>
+
+  <h4>Plausible causes</h4>
+  <ul>
+    <li>Arena's <code>spawnHeight</code> in <code>MAPS.arena</code> spawns bots above the floor; without gravity-integration for static bots they stay aloft. (Confirm by inspecting <code>integrateIdle</code> behavior on arena.)</li>
+    <li>Snapshot vs. render mismatch: bots' Y position is correct server-side but client renders relative to a different anchor on arena. Less likely.</li>
+    <li>The arena floor obstacle isn't blocking bot drops — bots fall through and clamp at <code>PLAYER.height / 2</code> only because of the static floor in <code>sim.ts</code>, but arena uses different obstacles than fps_shooter.</li>
+  </ul>
+
+  <h4>Action items</h4>
+  <ul class="checklist">
+    <li><input type="checkbox"> <span>Reproduce: load arena, watch the bot positions in <code>pnpm session:last --json | jq '.[0].npcState'</code> — actually use <code>/admin/snapshot</code> route (also from F6) to dump live positions.</span></li>
+    <li><input type="checkbox"> <span>If Y is large (e.g. 4+) and they don't fall → integrateIdle isn't running gravity on stationary bots, or the floor obstacle isn't present in arena.</span></li>
+    <li><input type="checkbox"> <span>Likely fix: ensure arena's obstacle list includes a floor AABB at <code>y = PLAYER.height / 2</code>, matching the fps_shooter floor pattern.</span></li>
+  </ul>
+</article>
+
+<!-- B10 -->
+<article class="item bug" id="b10">
+  <h3>
+    <span class="id">B10</span> Agent's body-state perception lags reality (broken feedback loop)
+    <span class="pill done">DONE</span>
+    <span class="pill pri-high">PRIORITY: HIGH</span>
+  </h3>
+
+  <h4>Symptom</h4>
+  <p>
+    Verbatim from <code>pnpm session:last</code> on the 5/16 4:12 PM Mira session
+    (full transcript in the report; key moments below):
+  </p>
+  <div class="quote-block">
+    <div><span class="ts">4:12:46</span><span class="who jeff">JEFF:</span> Hey, follow me, let's walk and talk.</div>
+    <div><span class="ts">4:12:46</span><span class="who mira">MIRA:</span> Lead the way, I guess.</div>
+    <div><span class="ts">4:12:49</span><span class="who mira">MIRA:</span> Huh, that's weird. It's not... it's not letting me. Like, I'm trying to move but my feet are stuck.</div>
+    <div><span class="ts">4:13:38</span><span class="who jeff">JEFF:</span> Whatever it's feeding you is not correct. This is a bug that we need to fix.</div>
+  </div>
+
+  <h4>Root cause</h4>
+  <p>
+    Three independent code paths can change a bot's body state — and only one of them
+    informed the agent:
+  </p>
+  <ol>
+    <li><strong>Tool handler</strong> (<code>handleFollowTool</code> et al.) — fired when the LLM successfully invoked the webhook. Emitted server <code>tool_call</code> events but no agent-visible signal.</li>
+    <li><strong>Regex fallback</strong> in <code>applyTranscriptIntent</code> — fired when the user's transcript matched "follow me" / "stop following" / etc. Mutated <code>bot.botFollowing</code> directly. <strong>No agent-visible signal.</strong></li>
+    <li><strong>Damage cascade</strong> (<code>markAttack</code>) and <strong>natural expiry</strong> (<code>pruneHostility</code>) — change hostility lists. Some had partial alerts (<code>friend_attacked</code>, <code>hostility_ended</code>), some didn't.</li>
+  </ol>
+  <p>
+    In the captured session, Mira's body <em>was</em> following correctly (via the regex
+    fallback). The LLM's internal model still said "not following" because nothing told
+    it the state had changed, so it improvised a "system's not letting me" excuse — the
+    same pattern as <a href="#b8">B8</a>.
+  </p>
+
+  <h4>Fix</h4>
+  <p>
+    Closed the perception loop. New <code>pushSelfStateAlert(bot, alert)</code> helper on the
+    server: if the bot has an active voice session, format an <code>npc_alert</code> system
+    message and push it via the existing <code>npc_alert</code> ServerMessage. The SDK queues
+    contextual updates for the agent's next turn, so the LLM sees the body-state confirmation
+    before its next response.
+  </p>
+  <p>Six new <code>NpcAlert</code> kinds added to <code>simulation.ts:NpcAlert</code> and
+  <code>server.ts:formatNpcAlert</code>:</p>
+  <ul>
+    <li><code>self_follow_started</code> / <code>self_follow_stopped</code> (source: tool | regex | auto)</li>
+    <li><code>self_flee_started</code></li>
+    <li><code>self_attack_started</code> / <code>self_attack_stopped</code> (source: tool | damaged | expire)</li>
+    <li><code>self_befriended_player</code></li>
+  </ul>
+  <p>Wired into every state-change site:</p>
+  <ul>
+    <li><code>handleFollowTool</code>, <code>handleFleeTool</code>, <code>handleStopAttackingTool</code>, <code>handleStartAttackingTool</code>, <code>handleMakeFriendTool</code></li>
+    <li><code>applyTranscriptIntent</code> (the regex fallback that fired in the captured session)</li>
+  </ul>
+  <p>The <code>self_follow_started</code> message text is deliberately direct:</p>
+  <pre><code>[System: Your body just started following ${playerName}. You'll automatically
+walk to stay near them — you don't need to do anything to keep up. If asked
+whether you're following, say yes. If your feet "feel stuck," that perception
+is wrong; trust this system message.]</code></pre>
+
+  <h4>Verify next session</h4>
+  <ol>
+    <li>Walk up to Mira, say "follow me."</li>
+    <li>Run <code>pnpm session:last</code>. Look for <code>tool_call follow_player</code> (or — if the agent didn't call the tool, the regex fallback path fired). Either way, the agent's next response should reference following correctly.</li>
+    <li>Ask Mira "are you following me?" — she should say yes with conviction, not "my feet are stuck."</li>
+    <li>Repeat with stop / flee / attack / friend tools.</li>
+  </ol>
+
+  <h4>Connection-closed observation (parked under B1)</h4>
+  <div class="callout info">
+    The captured session's <code>voice_session end</code> event had
+    <code>reason=connection_closed</code> after ~143s, which is the B1 disconnect pattern.
+    Jeff didn't flag it this turn; logging it for cross-reference with <a href="#b1">B1</a>.
+  </div>
+</article>
+
+<!-- B11 -->
+<article class="item bug" id="b11">
+  <h3>
+    <span class="id">B11</span> lean_wall / patrol / sprint_patrol verbal-only failures + missing telemetry
+    <span class="pill done">DONE</span>
+    <span class="pill pri-med">PRIORITY: MEDIUM</span>
+  </h3>
+
+  <h4>Symptom</h4>
+  <p>
+    Jeff said "leaning against the wall doesn't seem to work." <code>pnpm session:last</code>
+    on the captured session surfaced two distinct failure modes for the three new movement
+    tools (<code>patrol</code>, <code>sprint_patrol</code>, <code>lean_wall</code>):
+  </p>
+  <ol>
+    <li>
+      <strong>Vicky/fennel never called <code>lean_wall</code></strong> — she verbally
+      refused ("It seems I can't quite manage that right now") without invoking the webhook.
+      Classic <a href="#b8">B8</a> pattern: agent hallucinates a refusal, server never sees
+      the request.
+    </li>
+    <li>
+      <strong>Mira DID call all three tools — every one returned <code>npc not spawned</code>.</strong>
+      The events log showed <code>tool_call patrol/sprint_patrol/lean_wall</code> with <code>ok:false</code>
+      and <code>playerName=''</code> (hardcoded empty in the emit). With <code>playerName</code>
+      empty the lookup of the requesting human's snapshot fell through; the failure path also
+      didn't surface which bots actually were in the room, so debugging from the report alone
+      was impossible.
+    </li>
+  </ol>
+
+  <h4>Root cause</h4>
+  <ul>
+    <li>
+      <strong>Failure 1:</strong> The new tools had no regex fallback in
+      <code>applyTranscriptIntent</code>. The follow / stop_following pair has had one since
+      B8; the new tools were shipped without one, so any verbal-only refusal silently
+      stranded the request.
+    </li>
+    <li>
+      <strong>Failure 2:</strong> Two compounding gaps. The handlers' failure-path
+      <code>emit</code> calls passed <code>playerName: ''</code> (hardcoded) instead of the
+      caller's name, so feedback reports couldn't tie failures to a player. And the
+      <code>npc_not_spawned</code> branch returned a flat error with no inventory of the
+      bots that <em>were</em> in the room — leaving the question "which npcId did the agent
+      think it was?" unanswerable from logs.
+    </li>
+  </ul>
+
+  <h4>Fix</h4>
+  <p>Three changes in <code>apps/party/src/server.ts</code>:</p>
+  <ol>
+    <li>
+      <strong>Factored shared helpers</strong> — <code>applyPatrolToBot(bot, sprint)</code>
+      and <code>applyLeanTargetToBot(bot)</code> own the actual state mutations; tool
+      handlers and the regex fallback both call them so the two entry points cannot drift.
+    </li>
+    <li>
+      <strong>Telemetry repair</strong> — <code>handlePatrolTool</code> /
+      <code>handleLeanWallTool</code> now take <code>playerName</code> as a parameter (route
+      branches pass it through). Failure-path emits include <code>args: { reason: 'npc_not_spawned', botsInRoom: [...] }</code>
+      via a new <code>botInventory()</code> helper. The 404 response body carries the same
+      list so failed agent webhooks see the same diagnostics.
+    </li>
+    <li>
+      <strong>Regex fallbacks added</strong> to <code>applyTranscriptIntent</code> for
+      <code>lean_wall</code>, <code>sprint_patrol</code>, and <code>patrol</code>. Patterns
+      cover the natural phrasings ("lean against the wall," "take cover behind the wall,"
+      "patrol the area," "run patrol," "stretch your legs"). Order matters:
+      <code>sprint_patrol</code> is checked before <code>patrol</code> because "sprint
+      patrol" contains "patrol." Fallback emits include <code>args: { source: 'transcript' }</code>
+      so the feedback report can distinguish webhook calls from regex catches. Each
+      successful fallback also pushes the matching self-state alert
+      (<code>self_lean_started</code>, <code>self_patrol_started</code>) so the agent's
+      perception stays aligned (B10 invariant).
+    </li>
+  </ol>
+
+  <h4>Verify next session</h4>
+  <ol>
+    <li>Walk up to an NPC; say "lean against the wall." Bot should walk to the nearest wall and adopt the lean pose.</li>
+    <li>Same NPC, say "patrol the area." Bot resumes patrol. Then "sprint patrol" — bot patrols at sprint speed.</li>
+    <li>Run <code>pnpm session:last</code>. Each command should appear as a <code>tool_call</code> event with either the webhook source (no <code>source</code> arg) or the regex source (<code>source: 'transcript'</code>).</li>
+    <li>If <code>npc_not_spawned</code> ever fires, the event's args now include <code>botsInRoom</code> — confirms the failure mode and tells you which NPCs the server actually has.</li>
+  </ol>
+</article>
+
+<!-- ================================================================= -->
+<h2 id="features">Features</h2>
+
+<!-- F5 — Persona deltas (infrastructure that unblocks F1) -->
+<article class="item feature" id="f5">
+  <h3>
+    <span class="id">F5</span> NPC self-state / persona deltas
+    <span class="pill done">DONE</span>
+    <span class="pill pri-high">PRIORITY: HIGH</span>
+  </h3>
+
+  <div class="callout meta">
+    <span class="label">Why this matters</span>
+    NPC personas are baked into ElevenLabs agent system prompts — static.
+    When in-fiction events change a character ("your shoulder pain is gone",
+    "your friend Halsey is back"), we need a way to override specific facts
+    without re-PATCHing the agent every time. F5 is the primitive that makes
+    that possible. <a href="#f1">F1 (Halsey)</a> will use the same plumbing
+    to introduce "Halsey is alive" as a Mira delta when she walks into the
+    arena the first time.
+  </div>
+
+  <h4>What was built</h4>
+  <ul>
+    <li>New DO storage key <code>state:&lt;npcId&gt;</code> holding a list of <code>NpcStateEntry { at, summary, evidence?, source }</code>. Capped at 50 entries.</li>
+    <li><code>GameStorage.getNpcState / appendNpcState / clearNpcState</code> in <code>apps/party/src/storage.ts</code>.</li>
+    <li><code>buildMemoryBlob</code> front-loads a new section: <em>"## What's changed about you (authoritative — overrides your persona)"</em>. Each entry rendered with elapsed-since-changed. Layers above the world description so the LLM weighs it highest.</li>
+    <li>Admin route <code>POST/GET/DELETE /admin/npc-state</code>, secret-gated by the same <code>ELEVENLABS_AGENT_TOOL_SECRET</code> as the tool webhooks. No consent check (operator action, not player).</li>
+    <li>CLI: <code>pnpm npc:state &lt;npcId&gt; "&lt;summary&gt;" [--evidence="…"] [--source=X]</code>. Also <code>--list &lt;npcId&gt;</code> and <code>--clear &lt;npcId&gt;</code>.</li>
+  </ul>
+
+  <h4>Applied so far</h4>
+  <div class="callout info">
+    <span class="label">Mira — shoulder pain healed</span>
+    Backfilled <strong>5/16, 1:10 PM</strong> via <code>pnpm npc:state mira "Your shoulder pain is gone…"</code>.
+    Entry written with evidence pointing at the 5/16 9:35-9:56 AM transcript where Jeff committed.
+    Next time you talk to Mira and bring up the shoulder, she should notice the absence in the moment —
+    not preemptively announce it (the entry's summary explicitly instructs the LLM to discover, pause, react).
+  </div>
+
+  <h4>How to verify</h4>
+  <ol>
+    <li>Run <code>pnpm npc:state --list mira</code> and confirm the entry round-trips from storage.</li>
+    <li>Open a new voice session with Mira. Ask: "How's the shoulder?"</li>
+    <li>Expected: she pauses, notices it doesn't hurt, references the conversation where you offered to fix it. Her jumpiness should remain unchanged (per the entry's wording).</li>
+  </ol>
+
+  <h4>Follow-up — in-fiction tool (deferred)</h4>
+  <p>
+    The script is for operator-side use. For future durable changes the agent itself
+    should propose, add an <code>accept_self_change</code> webhook tool: when the player offers
+    a change AND the agent agrees in character, the tool writes the delta. Same storage path,
+    no operator step. Lower priority — the script-based flow is fine for now and prevents
+    accidental persona drift from sloppy LLM tool calls.
+  </p>
+</article>
+
+<!-- F6 — Workflow tooling -->
+<article class="item feature" id="f6">
+  <h3>
+    <span class="id">F6</span> Durable workflow: admin HTTP + session CLI
+    <span class="pill done">DONE</span>
+    <span class="pill pri-high">PRIORITY: HIGH</span>
+  </h3>
+
+  <div class="callout info">
+    <span class="label">Why this matters</span>
+    Until now, every time Jeff asked "look at my last session," I had to
+    locate the right DO sqlite file, run sqlite3 with quoted hex, pipe
+    through a node V8 deserializer, group sessions manually, and cross-reference
+    the events JSONL — about 10 minutes of friction per session. F6 makes it
+    one command. <strong>This is the path going forward for game-improvement
+    feedback loops.</strong>
+  </div>
+
+  <h4>What was built</h4>
+  <ul>
+    <li>
+      <strong>In-memory event ring buffer</strong> on the server
+      (<code>RECENT_EVENT_CAP = 1000</code>) so events can be joined with transcripts via HTTP
+      without relying on the tee'd JSONL file. Persists across <code>onMessage</code>
+      handlers (module-level state is per-DO isolate); drops on DO restart, which is fine
+      for operator telemetry.
+    </li>
+    <li>
+      <strong>Three new admin routes</strong>, secret-gated by
+      <code>ELEVENLABS_AGENT_TOOL_SECRET</code>:
+      <ul>
+        <li>
+          <code>GET /admin/sessions?count=N&amp;player=X&amp;since=2h</code> — decodes
+          all transcripts in this room, groups into sessions by 5-min gap, returns
+          last N enriched with overlapping events from the ring buffer and the NPC
+          persona-delta state that was active at session start.
+        </li>
+        <li>
+          <code>GET /admin/state</code> — every NPC's persona-delta entries in one call.
+        </li>
+        <li>
+          <code>GET /admin/snapshot</code> — live game state in this room: who's
+          playing, position, health, ammo, hostility (with ms remaining), follow targets,
+          active conversation partners, friendsWith.
+        </li>
+      </ul>
+    </li>
+    <li>
+      <strong>CLI wrapper</strong> <code>pnpm session:last</code> — queries both
+      <code>fps_shooter</code> and <code>arena</code> rooms, merges, sorts by recency,
+      pretty-prints as markdown. Flags: <code>--player=X</code>, <code>--since=2h</code>,
+      <code>--json</code>, <code>--no-content</code>. Positional arg is session count.
+    </li>
+  </ul>
+
+  <h4>The new workflow</h4>
+  <ol>
+    <li>You play the game.</li>
+    <li>When something interesting happens, you tell me about it.</li>
+    <li>I run <code>pnpm session:last</code> (or <code>pnpm session:last 3</code>, or with a player filter). Single command, no SQLite, no V8 decoding.</li>
+    <li>The output includes: transcript, tools fired during the window, hostility changes, shots, feedback signals, and the NPC state that was active. Everything I need to analyze + suggest fixes.</li>
+  </ol>
+
+  <h4>Known gap</h4>
+  <div class="callout danger">
+    <span class="label">Persona deltas are per-room, not per-NPC</span>
+    Mira's "shoulder pain is gone" delta was written into the <code>fps_shooter</code> DO.
+    When Jeff played on <code>arena</code> next, the arena DO has no record of the delta —
+    Mira there still has her pain. Same is true for transcripts and friendships (already documented in CLAUDE.md as a v1 limitation).
+    The cleanest fix is a shared "global NPC state" key space outside any room's DO,
+    or a startup hook that propagates deltas across rooms. <strong>Tracking as a follow-up;
+    not in scope for F6.</strong>
+  </div>
+
+  <h4>Verify</h4>
+  <ol>
+    <li>Server is hot-reloaded with the new routes (confirmed live by the smoke test that returned the 5/16 1:26 PM arena session).</li>
+    <li>Run <code>pnpm session:last</code> — should print the most recent session as markdown.</li>
+    <li>Run <code>pnpm session:last 3 --no-content</code> — three most recent across both rooms, summary only.</li>
+    <li>Run <code>pnpm session:last --json</code> — raw structured data, pipeable to other tools.</li>
+  </ol>
+</article>
+
+<!-- F7 — Game-change registry -->
+<article class="item feature" id="f7">
+  <h3>
+    <span class="id">F7</span> Game-change registry: NPCs notice every shipped change
+    <span class="pill done">DONE</span>
+    <span class="pill pri-high">PRIORITY: HIGH</span>
+  </h3>
+
+  <div class="callout info">
+    <span class="label">Why this matters</span>
+    Hand-applying persona deltas with <code>pnpm npc:state</code> is for one-offs.
+    Repeating the dance for every shipped mechanic (coffee, new characters, world-state shifts)
+    × 7 NPCs × every map is fragile and easy to forget. F7 turns the persona-delta
+    primitive (<a href="#f5">F5</a>) into a repeatable workflow keyed off a single
+    TypeScript registry.
+  </div>
+
+  <h4>What was built</h4>
+  <ul>
+    <li>
+      <strong>Registry</strong> at <code>packages/shared/src/game-changes.ts</code> exports
+      <code>GAME_CHANGES: readonly GameChange[]</code>. Each entry:
+      <code>{ id, at, scope: 'all' | npcId[], summary, evidence? }</code>.
+    </li>
+    <li>
+      <strong>Storage dedup</strong>: <code>seeded:&lt;id&gt;</code> boolean key in the DO.
+      <code>storage.isGameChangeSeeded</code> / <code>markGameChangeSeeded</code>.
+    </li>
+    <li>
+      <strong>onStart hook</strong>: <code>server.ts:seedGameChanges()</code> walks
+      <code>GAME_CHANGES</code> and writes every unseeded entry as a persona delta to every
+      in-scope NPC's <code>state:&lt;npcId&gt;</code>, then marks the seed key. Logs
+      <code>[game-change] seeded &lt;id&gt; → N NPC(s) in room &lt;map&gt;</code>.
+    </li>
+    <li>
+      <strong>First entry seeded</strong>: <code>2026-05-16-coffee-maker</code> → 6 NPCs in
+      fps_shooter (verified via <code>pnpm npc:state --list mira</code>; mira now has 2 entries).
+    </li>
+  </ul>
+
+  <h4>The workflow going forward</h4>
+  <ol>
+    <li>Ship the code change.</li>
+    <li>Add a <code>GameChange</code> entry describing what NPCs should know. NPC POV, second person, present tense.</li>
+    <li>Reload the server. Each room's onStart writes the delta into NPC state exactly once (dedup'd by id).</li>
+    <li>Next conversation: NPCs reference the change in character via memoryBlob's "## What's changed about you" section.</li>
+  </ol>
+
+  <h4>Conventions</h4>
+  <ul>
+    <li><code>id</code> is the dedup key. <strong>Never rename or reuse.</strong> Changing the summary on an already-seeded id keeps the old wording; bump the id (e.g. <code>-v2</code>) to re-seed everywhere.</li>
+    <li><code>at</code> must be deterministic — use <code>Date.parse('YYYY-MM-DDT00:00:00Z')</code>, not <code>Date.now()</code>.</li>
+    <li>Each map's DO seeds independently — a change applies to <code>fps_shooter</code> the first time that room boots after deploy, and to <code>arena</code> the first time that room boots. Both rooms then track their own seeded set.</li>
+    <li>50-entry cap on <code>state:&lt;npcId&gt;</code> applies. Watch as the registry grows; if it crosses ~40 entries, raise <code>NPC_STATE_CAP</code>.</li>
+  </ul>
+
+  <h4>What does NOT belong in the registry</h4>
+  <ul>
+    <li>Per-player history (use friendship).</li>
+    <li>Event-triggered cascades like "first player to drink coffee" — those stay imperative (the existing <code>coffee:discovered</code> path).</li>
+    <li>Bug fixes that don't change in-game reality (nav improvements, persona-perception fixes). Only ship a registry entry if NPCs should be able to talk about the change.</li>
+  </ul>
+
+  <h4>Files</h4>
+  <ul>
+    <li><a href="../packages/shared/src/game-changes.ts"><code>packages/shared/src/game-changes.ts</code></a> — registry + type</li>
+    <li><a href="../apps/party/src/storage.ts"><code>apps/party/src/storage.ts</code></a> — <code>isGameChangeSeeded</code> / <code>markGameChangeSeeded</code></li>
+    <li><a href="../apps/party/src/server.ts"><code>apps/party/src/server.ts</code></a> — <code>seedGameChanges()</code> + <code>onStart</code> hook</li>
+  </ul>
+</article>
+
+<!-- F1 — Halsey -->
+<article class="item feature" id="f1">
+  <h3>
+    <span class="id">F1</span> Halsey: making Mira's lost friend real
+    <span class="pill todo">TODO</span>
+    <span class="pill pri-high">PRIORITY: HIGH</span>
+  </h3>
+
+  <div class="callout meta">
+    <span class="label">Meta-fiction warning</span>
+    Halsey originated as a detail in Mira's <em>backstory</em> — a courier Mira trained who didn't
+    come back. In tonight's conversation Jeff offered to "help her find her way back" and Mira
+    accepted. We're now creating Halsey as a real seventh NPC whose persona was effectively
+    written by Mira in-conversation. Mira's persona must be edited so the introduction reads as
+    Halsey <strong>actually returning</strong>, not as Mira meeting a new character with a
+    familiar name.
+  </div>
+  <div class="callout info">
+    <span class="label">Prerequisite — now satisfied</span>
+    The "Mira knows Halsey is back" half can now use <a href="#f5">F5 (persona deltas)</a>
+    instead of re-PATCHing Mira's ElevenLabs agent. Plan: when Halsey first walks into the
+    arena, write a Mira state entry — <em>"Halsey is alive and back in the arena as of [date].
+    You haven't seen her since you thought she was gone."</em> Mira's next session reads it
+    and the reunion plays in-character.
+  </div>
+
+  <h4>Halsey's persona (as Mira described her)</h4>
+  <table>
+    <tr><th>Trait</th><th>Source quote</th></tr>
+    <tr><td>Age</td><td>"good kid" — implies young, early 20s, younger than Mira</td></tr>
+    <tr><td>Role</td><td>"I trained her, showed her the ropes" — courier, junior to Mira</td></tr>
+    <tr><td>Speech</td><td>"quick, real quick, always had a smile, even when things were... well, you know"</td></tr>
+    <tr><td>Vibe</td><td>"talking about getting out of here" — optimistic, has plans, future-oriented</td></tr>
+    <tr><td>Status</td><td>Believed lost on a bad run. Actually alive — found her way back via Jeff's intervention.</td></tr>
+    <tr><td>Hooks</td><td>Complaints about the new lightweight boots (per Mira's worldview); the price of coffee; plans for "out"</td></tr>
+    <tr><td>Relation to Mira</td><td>Best friend / mentee. Mira mourned her for an indeterminate period. Reunion is emotionally significant — both NPCs should treat it that way.</td></tr>
+  </table>
+
+  <h4>Action items — in order</h4>
+  <ul class="checklist">
+    <li><input type="checkbox"> <span><strong>Pick a character model</strong> for Halsey. <code>eve</code> and <code>medea</code> have known bind-pose issues per existing comments in <code>npc-roster.ts</code>. Options: a new model, or accept that Halsey shares a body with Mira/Vex/Vicky and add a visual differentiator (color tint, hair, etc.). <span class="sub">Pragmatic default: <code>maria</code> (already in use by Mira/Vex/Vicky) and lean on voice differentiation. Or block on a new clean female model.</span></span></li>
+    <li><input type="checkbox"> <span><strong>Pick a voice id</strong> distinct from the existing six. <code>VOICE_BY_CHARACTER</code> is just a mapping for seeding — add a per-NPC voice override on <code>NpcDef</code> if Halsey needs to sound different from Mira despite sharing the maria model. <span class="sub">Suggest: a younger-sounding female voice from the ElevenLabs library to match "good kid, real quick".</span></span></li>
+    <li><input type="checkbox"> <span><strong>Write Halsey's persona</strong> as a new <code>NpcDef</code> entry. Keep it in the same multi-paragraph style as Mira's. Include the explicit fact that she's <em>back</em> — recent return, still processing — so the agent doesn't default to "I've always been here" tropes.</span></li>
+    <li><input type="checkbox"> <span><strong>Author <code>startingFriends: ['mira']</code></strong> and add <code>'halsey'</code> to Mira's <code>startingFriends</code>. Edge case: Mira's existing friendship is with Guts only — Halsey should slot in without displacing him.</span></li>
+    <li><input type="checkbox"> <span><strong>Author <code>greetings</code></strong> for Halsey. Avoid the "stranger meeting" energy — she's reuniting with people she knows. <span class="sub">e.g. "Hey, you. Mira said you'd be around."  /  "Long time. Got a minute?"  /  "I made it back. Long story."</span></span></li>
+    <li><input type="checkbox"> <span><strong>Edit Mira's persona</strong> to reflect Halsey's return. The current Mira persona says Halsey "didn't make it" — flip that to: she was lost for a while, just came back, Mira is still adjusting. Add an explicit instruction: <em>"Halsey is alive and back in the arena. Treat any reference to her as present-day, not past tense."</em></span></li>
+    <li><input type="checkbox"> <span><strong>Update the world bible</strong> at <code>docs/world-bible.md</code> to add Halsey to "the other NPCs you live with" section. Re-upload via <code>POST /v1/convai/knowledge-base/text</code> (replacing the existing doc, or as a new version — check API behavior).</span></li>
+    <li><input type="checkbox"> <span><strong>Create Halsey's ElevenLabs agent</strong> via the existing seeding script pattern. Set system prompt to her persona, attach all 6 webhook tools, attach the (updated) world bible doc.</span></li>
+    <li><input type="checkbox"> <span><strong>Drop the new agent_id into <code>npc-roster.ts</code></strong> and verify <code>resolveAgentId</code> picks it up (no <code>TODO_AGENT_ID</code> prefix).</span></li>
+    <li><input type="checkbox"> <span><strong>Trigger her arrival</strong>. Two options: (a) Halsey just exists from the next match — clean but un-dramatic. (b) Add a one-time "arrival event" — when Mira sees Halsey for the first time in a session, an <code>npc_alert</code> fires for Mira <em>and any active session</em> with text "[System: Halsey just walked into the arena. You haven't seen her since you thought she was gone.]". The agent reacts in voice. <span class="sub">Strongly recommend (b). The whole point of this feature is the emotional payoff.</span></span></li>
+    <li><input type="checkbox"> <span><strong>Consider Halsey's perspective on Jeff.</strong> Mira told Jeff she'd love Halsey back. Should Halsey know Jeff helped her return? If yes, her starting context should include a memoryBlob entry. If no, leave it as mystery — Halsey just got back, doesn't know why or how.</span></li>
+  </ul>
+
+  <h4>Things to <em>not</em> do</h4>
+  <ul>
+    <li>Don't break Mira's persona by removing the trauma — her shoulder, her jumpiness, her conspiracy theories all stay. Halsey returning is one specific delta, not a personality wipe.</li>
+    <li>Don't make Halsey aware she's an AI character. Mira had to learn that across 20 minutes of conversation. Halsey starts the same way Mira did — fully in-character.</li>
+    <li>Don't auto-make Halsey friends with everyone Mira's friends with. Friendship is per-pair. She'll meet the others fresh, possibly via Mira's introductions.</li>
+  </ul>
+</article>
+
+<!-- F2 — Sense of time -->
+<article class="item feature" id="f2">
+  <h3>
+    <span class="id">F2</span> NPC sense of time across sessions
+    <span class="pill todo">TODO</span>
+    <span class="pill pri-med">PRIORITY: MED</span>
+  </h3>
+  <p>
+    Spec is folded into <a href="#b2">B2's action items</a> above — same machinery
+    (storage of <code>lastSessionEndAt</code>, elapsed-time in <code>npc_context</code>,
+    bucketed greeting selection). Listed separately here because the same plumbing
+    enables broader time-awareness: NPCs can say "it's been a while" naturally, reference
+    "earlier today we talked about X," and avoid the uncanny-valley repetition of stock greetings.
+  </p>
+  <p>Additional unlocks once the plumbing is in:</p>
+  <ul>
+    <li>Friendship score decay over real-world days of no contact (slow drift back toward neutral).</li>
+    <li>Time-of-day awareness if you ever care (current pass would just label morning/afternoon/evening).</li>
+    <li>NPCs noticing rapid re-engagements ("you again? what is it") vs. patient ones.</li>
+  </ul>
+</article>
+
+<!-- F3 — Jump -->
+<article class="item feature" id="f3">
+  <h3>
+    <span class="id">F3</span> NPC jump action
+    <span class="pill todo">TODO</span>
+    <span class="pill pri-low">PRIORITY: LOW</span>
+  </h3>
+  <p>
+    Came up at 9:42:33 (<em>"Can you jump?"</em>). Mira said no. Jeff said he could add it.
+    Server-side already supports jumping for human players via <code>InputFrame.jump</code>; the
+    controller doesn't currently issue jump inputs because nothing in the AI loop calls for it.
+    Adding a "jump when path requires" branch is straightforward — but skip-waypoint / sidestep
+    (the upstream plan's stuck ladder) should land first since geometry-stuck is the higher pain.
+  </p>
+  <ul class="checklist">
+    <li><input type="checkbox"> <span>Defer. Revisit after B5 stuck-ladder ships.</span></li>
+  </ul>
+</article>
+
+<!-- ================================================================= -->
+<h2 id="non-goals">Out of scope (for now)</h2>
+<ul>
+  <li>Adding LLM-based feedback extraction in real-time (currently report-time only). Stays report-time.</li>
+  <li>Per-player UUIDs (currently identity = name). Documented v1 limitation; unrelated to this workbook.</li>
+  <li>Migrating events to Cloudflare Analytics Engine. Tee-to-file is fine for dev iteration.</li>
+  <li>Persistence of friendship score across maps. Currently per-room (per-map). Halsey/Mira's friendship is per-map — fine for now.</li>
+</ul>
+
+<hr>
+<p style="color: var(--ink-dim); font-size: 12px;">
+  Last regenerated by hand on 5/16. To regenerate cleanly: <code>open docs/workbook.html</code>.
+  Mark items <code>class="pill doing"</code> when started, <code>class="pill done"</code> when complete.
+</p>
+
+</body>
+</html>

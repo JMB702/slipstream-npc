@@ -28,6 +28,15 @@ export const RemotePlayer = ({ id }: Props) => {
     if (!me || !them) return false;
     return them.friendsWith.includes(me.name) || me.friendsWith.includes(them.name);
   });
+  const voiceIcon = useGame((s) => {
+    const sess = s.activeVoiceSession;
+    if (!sess) return null;
+    const last = s.snapshots[s.snapshots.length - 1];
+    const them = last?.players.get(id);
+    if (!them || them.npcId !== sess.npcId) return null;
+    if (s.voiceOutputVolume <= 0.05) return null;
+    return 'speaker' as const;
+  });
 
   useFrame(() => {
     const snaps = useGame.getState().snapshots;
@@ -84,7 +93,11 @@ export const RemotePlayer = ({ id }: Props) => {
         playerId={id}
         isBot={player.isBot}
         isFriend={isFriend}
+        voiceIcon={voiceIcon}
         characterId={player.characterId}
+        pose={player.pose}
+        poseTransition={player.poseTransition}
+        danceVariant={player.danceVariant}
       />
     </group>
   );

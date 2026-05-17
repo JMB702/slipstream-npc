@@ -16,6 +16,7 @@ export const planPath = (start: Vec3, goal: Vec3): Vec3[] | null => {
   if (graph.nodes.length === 0) return [goal];
   const startIdx = nearestReachableNode(start);
   const goalIdx = nearestReachableNode(goal);
+  if (startIdx < 0 || goalIdx < 0) return null;
   if (startIdx === goalIdx) {
     return [graph.nodes[startIdx]!, goal];
   }

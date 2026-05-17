@@ -64,8 +64,9 @@ export const MATCH = {
   defaultBotCount: 3,
   minBotCount: 0,
   // Cap so bots+humans never exceed MAX_PLAYERS=8. Server clamps further if
-  // humans have already filled the room.
-  maxBotCount: 7,
+  // humans have already filled the room. Also matches NPCS.length so every
+  // lobby slot can be filled by a distinct persona.
+  maxBotCount: 6,
   // Default to easy — the first user reaction was "too good", and easy is a
   // friendlier on-ramp. Selectable from the lobby.
   defaultBotDifficulty: 'easy' as BotDifficulty,
@@ -74,7 +75,7 @@ export const MATCH = {
 // Difficulty-independent bot tuning. These don't affect lethality — they're
 // pacing/perf knobs (controller cadence, navigation thresholds, names).
 export const BOT = {
-  names: ['Wraith', 'Echo', 'Vex', 'Halcyon', 'Nyx', 'Onyx', 'Reaver', 'Specter'],
+  names: ['Wraith', 'Echo', 'Vex', 'Jacqueline', 'Nyx', 'Onyx', 'Reaver', 'Specter'],
   // How often the controller re-evaluates its target pick.
   targetReacquireMs: 250,
   // How often A* recomputes a path to the current goal.
@@ -83,6 +84,22 @@ export const BOT = {
   losCheckMs: 100,
   // Switch to next waypoint when within this distance.
   waypointArriveDist: 1.2,
+  // Follow-state-machine thresholds.
+  //   followStandoffDist (inner): once inside, bot enters HOLD and stands still.
+  //   followResumeDist  (outer):  bot stays in HOLD until player moves past this.
+  //   followResumeDelayMs:        on HOLD → FOLLOWING, suppress forward motion
+  //                               for this window so the bot turns first.
+  // The gap between standoff and resume is the hysteresis: when the player
+  // walks past the bot at close range, the bot stays put instead of retreating.
+  followStandoffDist: 2.5,
+  followResumeDist: 4.0,
+  followResumeDelayMs: 500,
+  // /tools/lean_wall config. Search radially with N rays from chest height
+  // for the nearest obstacle; stop standoff back from the hit, face away.
+  // Walls farther than searchDist return "no wall nearby" (tool 404).
+  leanSearchRays: 16,
+  leanSearchDist: 12.0,
+  leanStandoffDist: 0.55,
   // Sprint when next waypoint is at least this far.
   sprintWhenFurtherThan: 12,
   // Reload when ammo drops below this and we're not actively engaged.
@@ -343,8 +360,11 @@ export const SOCIAL = {
 } as const;
 
 export const NPC_VOICE = {
-  radius: 5,
-  hysteresis: 0.5,
+  // 15m radius gives players a chance to call out to an NPC across a room
+  // instead of having to be face-to-face. Hysteresis prevents flapping at
+  // the boundary as the player paces.
+  radius: 15,
+  hysteresis: 1,
 } as const;
 
 export const VAULT = {
@@ -368,4 +388,52 @@ export const VAULT = {
   // approx the window opening center (y≈1.5) at midpoint so the visual
   // travels THROUGH the opening rather than the solid wall above/below.
   arcHeight: 0.7,
+} as const;
+
+// Free-coffee interactable. One mesh placed in the fps_shooter GLTF; players
+// press E / gamepad Y near it to play a pickup→drink animation, gain a small
+// heal + sprint buff, and (the point) NPCs notice — Guts has been complaining
+// about coffee prices for as long as anyone remembers, so a free maker
+// appearing in the arena is narratively load-bearing.
+export const COFFEE = {
+  // Max distance from the player capsule center to the maker's world position
+  // for a drink press to register. Tuned to be comfortable but not so wide it
+  // triggers from across the room.
+  interactRadius: 1.8,
+  // No cooldown: repeated drinks are allowed so NPC behavior around the maker
+  // can be tested quickly without waiting between attempts.
+  cooldownMs: 0,
+  // HP restored per drink, capped at PLAYER.maxHealth.
+  healAmount: 25,
+  // Sprint speed multiplier while the buff is active. Pushed up so the
+  // caffeine kick is genuinely felt — base sprint is 9 m/s, so 1.6× puts
+  // the drinker at ~14.4 m/s, fast enough to clearly outrun the NPCs.
+  sprintMultiplier: 1.6,
+  // How long the sprint buff + "NPCs talk faster" effect persist after a drink.
+  buffDurationMs: 120_000,
+  // How long the player is movement-locked while the drink animation plays.
+  // Must cover the client's ALIGN_MS (400) + PICKUP_HOLD_MS (3500) +
+  // DRINK_HOLD_MS (9000) so the animation runs to completion without the
+  // player sliding around. Tiny buffer past 12900 so the lock releases
+  // just after the visual fully resolves.
+  drinkLockMs: 13_000,
+  // Bots in this radius (around the drinker, when they drink) hear/see the
+  // event and — if they're in an active voice session — get an npc_alert.
+  // Wider than NPC_VOICE.radius (15m) on purpose: they don't need to be in
+  // talking range to NOTICE someone using the maker.
+  observationRadius: 18,
+} as const;
+
+// Pose system — voice-driven NPCs and player roleplay can occupy expressive
+// body poses (sit, lay, lean against wall, dance) outside the combat loop.
+// Transitions (sit_down, stand_up, lay_down) are one-shot clips with timed
+// durations; once elapsed the server flips to the steady-state pose.
+export const POSE = {
+  sitDownMs: 1500,
+  layDownMs: 1800,
+  standUpMs: 1300,
+  // Max poses persisted across a respawn? No — pose clears on death/respawn.
+  // Combat overrides: any incoming attack clears pose so the NPC can react.
+  // Number of dance variants supported (DanceHipHop, DanceSalsa, DanceSilly).
+  danceVariants: 3,
 } as const;

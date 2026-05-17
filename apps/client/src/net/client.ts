@@ -8,7 +8,11 @@ import {
   type ServerMessage,
 } from '@slipstream-npc/shared';
 import { useGame } from '../store.js';
-import { handleConsentRequired, handleNpcContext } from '../voice/manager.js';
+import { handleConsentRequired, handleNpcAlert, handleNpcContext } from '../voice/manager.js';
+import { onServerSignal } from '../voice/webrtc-mesh.js';
+import { startVoiceRuntime, stopVoiceRuntime } from '../voice/voice-runtime.js';
+import { onSttTokenReply } from '../voice/player-stt.js';
+import { enqueueNpcChunk, stopNpcUtterance } from '../voice/npc-audio-playback.js';
 
 const urlHost =
   typeof window !== 'undefined'
@@ -29,6 +33,7 @@ export const connect = (
   accessCode?: string,
   botCount?: number,
   botDifficulty?: BotDifficulty,
+  npcIds?: string[],
 ): NetClient => {
   const store = useGame.getState();
   store.setConn('connecting');
@@ -43,6 +48,9 @@ export const connect = (
   }
   if (botDifficulty) {
     query.botDifficulty = botDifficulty;
+  }
+  if (npcIds && npcIds.length > 0) {
+    query.npcIds = npcIds.join(',');
   }
   if (accessCode) {
     query.accessCode = accessCode;
@@ -87,6 +95,7 @@ export const connect = (
       useGame.getState().setCloseReason(reason || 'room full');
     }
     useGame.getState().setConn('disconnected');
+    stopVoiceRuntime();
   });
 
   socket.addEventListener('message', (event) => {
@@ -100,6 +109,7 @@ export const connect = (
     switch (msg.type) {
       case 'welcome':
         s.setMyId(msg.you);
+        void startVoiceRuntime(msg.you, name, (out) => socket.send(encode(out)));
         return;
       case 'snapshot':
         s.ingestSnapshot(msg.snapshot);
@@ -112,8 +122,30 @@ export const connect = (
       case 'npc_context':
         handleNpcContext(msg);
         return;
+      case 'npc_alert':
+        handleNpcAlert(msg);
+        return;
       case 'consent_required':
         handleConsentRequired();
+        return;
+      case 'webrtc_signal':
+        onServerSignal(msg);
+        return;
+      case 'stt_token':
+        onSttTokenReply(msg);
+        return;
+      case 'npc_audio_chunk':
+        void enqueueNpcChunk({
+          npcId: msg.npcId,
+          utteranceId: msg.utteranceId,
+          chunkIdx: msg.chunkIdx,
+          mime: msg.mime,
+          b64: msg.b64,
+          isFinal: msg.isFinal,
+        });
+        return;
+      case 'npc_audio_stop':
+        stopNpcUtterance(msg.npcId, msg.utteranceId);
         return;
     }
   });

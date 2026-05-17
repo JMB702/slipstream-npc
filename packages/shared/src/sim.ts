@@ -1,4 +1,4 @@
-import { PLAYER, type Obstacle } from './constants.js';
+import { COFFEE, PLAYER, type Obstacle } from './constants.js';
 import { getActiveMap } from './maps.js';
 import type { InputFrame } from './messages.js';
 import type { Vec3 } from './state.js';
@@ -9,6 +9,10 @@ export interface MovableState {
   yaw: number;
   pitch: number;
   grounded: boolean;
+  // Coffee-buff expiry (Date.now ms). When present and in the future, sprint
+  // speed gets COFFEE.sprintMultiplier applied. Optional so plain MovableState
+  // callers (tests, future props) don't have to set it.
+  coffeeBuffUntil?: number;
 }
 
 export const applyMovement = (state: MovableState, input: InputFrame): MovableState => {
@@ -18,7 +22,10 @@ export const applyMovement = (state: MovableState, input: InputFrame): MovableSt
   const pitch = clamp(input.pitch, -Math.PI / 2 + 0.01, Math.PI / 2 - 0.01);
   const dt = Math.min(input.dtMs, 100) / 1000;
 
-  const speed = input.sprint ? PLAYER.sprintSpeed : PLAYER.walkSpeed;
+  const coffeeActive =
+    state.coffeeBuffUntil !== undefined && Date.now() < state.coffeeBuffUntil;
+  const sprintBoost = input.sprint && coffeeActive ? COFFEE.sprintMultiplier : 1;
+  const speed = (input.sprint ? PLAYER.sprintSpeed : PLAYER.walkSpeed) * sprintBoost;
   const fwd = clamp(input.forward, -1, 1);
   const strafe = clamp(input.right, -1, 1);
 

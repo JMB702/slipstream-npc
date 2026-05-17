@@ -1,0 +1,427 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Slipstream Rift — Backstory</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --panel-2: #1e222b;
+    --ink: #e6e9ef;
+    --ink-dim: #9aa3b2;
+    --rule: #2a2f3a;
+    --accent: #ffae3b;
+    --ok: #5ad28a;
+    --warn: #ffae3b;
+    --danger: #ff6a6a;
+    --meta: #a48cff;
+    --code-bg: #0b0d12;
+  }
+  html { background: var(--bg); color: var(--ink); }
+  body {
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Inter, system-ui, sans-serif;
+    margin: 0 auto;
+    padding: 32px 40px 120px;
+    max-width: 1100px;
+  }
+  h1, h2, h3, h4 { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui; letter-spacing: -0.01em; }
+  h1 { font-size: 32px; margin: 0 0 4px; }
+  h2 { font-size: 22px; margin: 36px 0 12px; padding-bottom: 6px; border-bottom: 1px solid var(--rule); }
+  h3 { font-size: 17px; margin: 0 0 10px; }
+  h4 { font-size: 12px; margin: 14px 0 6px; color: var(--ink-dim); text-transform: uppercase; letter-spacing: 0.08em; font-weight: 700; }
+  p { margin: 6px 0 10px; }
+  code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 13px; background: var(--code-bg); padding: 1px 6px; border-radius: 4px; color: #ffd49a; }
+  ul, ol { padding-left: 22px; margin: 6px 0 12px; }
+  li { margin: 4px 0; }
+  hr { border: none; border-top: 1px solid var(--rule); margin: 32px 0; }
+
+  .preamble { color: var(--ink-dim); margin-bottom: 24px; }
+
+  .doc-nav {
+    display: flex;
+    gap: 8px;
+    margin: 16px 0 24px;
+    flex-wrap: wrap;
+  }
+  .doc-nav a {
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 6px 12px;
+    border-radius: 16px;
+    background: var(--panel-2);
+    border: 1px solid var(--rule);
+    color: var(--ink-dim);
+    text-decoration: none;
+  }
+  .doc-nav a:hover { color: var(--ink); border-color: #3a4150; }
+  .doc-nav a.current { background: #2a2618; color: var(--accent); border-color: var(--accent); }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: 10px;
+    padding: 18px 22px;
+    margin: 14px 0;
+    border-left: 3px solid var(--accent);
+  }
+  .card.muted { border-left-color: var(--ink-dim); }
+
+  .callout {
+    border-radius: 8px;
+    padding: 14px 18px;
+    margin: 12px 0;
+    background: var(--panel-2);
+    border-left: 3px solid var(--accent);
+  }
+  .callout.ok { border-left-color: var(--ok); background: #142219; }
+  .callout.danger { border-left-color: var(--danger); background: #221414; }
+  .callout.meta { border-left-color: var(--meta); }
+  .callout.warn { border-left-color: var(--warn); background: #2a2316; }
+  .callout.warn .label { color: var(--warn); }
+  .callout .label {
+    display: block;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--ink-dim);
+    margin-bottom: 6px;
+  }
+  .callout.ok .label { color: var(--ok); }
+  .callout.danger .label { color: var(--danger); }
+
+  .npc-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 14px;
+    margin: 12px 0;
+  }
+  @media (max-width: 760px) { .npc-grid { grid-template-columns: 1fr; } }
+  .npc {
+    background: var(--panel-2);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    padding: 14px 16px;
+    border-left: 3px solid var(--meta);
+  }
+  .npc .name {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui;
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--meta);
+    margin: 0 0 6px;
+    letter-spacing: -0.01em;
+  }
+  .npc .desc { margin: 0; color: var(--ink); }
+
+  #toolbar {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    background: var(--panel);
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    padding: 8px 10px;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.4);
+    z-index: 100;
+  }
+  #toolbar button {
+    background: var(--panel-2);
+    color: var(--ink);
+    border: 1px solid var(--rule);
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 13px;
+    font-family: inherit;
+    cursor: pointer;
+    transition: background 0.1s, border-color 0.1s;
+  }
+  #toolbar button:hover { background: #262b36; border-color: #3a4150; }
+  #toolbar button.primary { background: #2a3a26; border-color: #3d5135; color: var(--ok); }
+  #toolbar button.primary:hover { background: #34472f; }
+  #toolbar button.danger:hover { background: #3a1c1c; border-color: var(--danger); color: var(--danger); }
+  #toolbar .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--ink-dim);
+    transition: background 0.2s;
+  }
+  #toolbar .dot.dirty { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+  #toolbar .status {
+    font-size: 11px;
+    color: var(--ink-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+
+  [contenteditable="true"] {
+    outline: none;
+    border-radius: 4px;
+    transition: background 0.15s, box-shadow 0.15s;
+  }
+  [contenteditable="true"]:hover { background: rgba(255, 174, 59, 0.04); }
+  [contenteditable="true"]:focus {
+    background: rgba(255, 174, 59, 0.06);
+    box-shadow: inset 0 0 0 1px rgba(255, 174, 59, 0.3);
+  }
+  body.locked [contenteditable="true"] { background: transparent !important; box-shadow: none !important; cursor: default; }
+  body.locked [contenteditable] { pointer-events: none; }
+</style>
+</head>
+<body>
+
+<div id="toolbar">
+  <div class="dot" id="dot" title="Unsaved changes indicator"></div>
+  <span class="status" id="status">Saved</span>
+  <button id="btn-save" class="primary" title="Download backstory.html with current edits">Save</button>
+  <button id="btn-copy" title="Copy full HTML to clipboard">Copy HTML</button>
+  <button id="btn-lock" title="Toggle read-only mode">Lock</button>
+  <button id="btn-reset" class="danger" title="Restore the original content">Reset</button>
+</div>
+
+<div id="editable-root">
+
+<h1 contenteditable="true">Slipstream — backstory</h1>
+<p class="preamble" contenteditable="true">
+  Shared knowledge for every NPC, on every map. These are facts you would know just from living in this world — who you are, who the other NPCs are, what players are, what you can and can't do. Your <strong>personality</strong> (in your system prompt) controls how you'd talk about any of this. The <strong>map you're currently in</strong> is described in a separate document.
+</p>
+
+<div class="doc-nav">
+  <a href="backstory.html" class="current">Backstory</a>
+  <a href="map-fps-shooter.html">Map: FPS Shooter Arena</a>
+  <a href="map-arena.html">Map: Original Arena</a>
+</div>
+
+<div class="callout warn">
+  <span class="label">After editing — sync to ElevenLabs</span>
+  <p contenteditable="true" style="margin:0;">
+    NPCs only read content that lives in the <strong>ElevenLabs knowledge base</strong>, not this HTML. When you finish editing, hit <strong>Save</strong>, replace the file in <code>docs/</code>, then sync to all 6 NPC agents by running from the repo root:
+  </p>
+  <p style="margin:8px 0 0;">
+    <code>pnpm sync:kb</code>
+  </p>
+  <p contenteditable="true" style="margin:8px 0 0; color: var(--ink-dim); font-size: 13px;">
+    The script reads <code>backstory.html</code>, <code>map-fps-shooter.html</code>, and <code>map-arena.html</code>, strips them to text, and replaces the matching documents in every NPC agent's knowledge base. Until you run it, agents are running on stale lore.
+  </p>
+</div>
+
+<h2 contenteditable="true">The arena complex</h2>
+<div class="card">
+  <p contenteditable="true">
+    You live inside <strong>one arena map at a time</strong>, but the complex contains more than one. NPCs know the other maps are real — different sections of the same operation, different rooms, different layouts — and people sometimes get rotated between them. You don't move between maps yourself. When you're in one, that's where you are. Your memory of conversations and friendships travels with you across rotations as long as the people you knew keep the same name.
+  </p>
+  <p contenteditable="true">
+    There are currently two known sections of the complex: the <strong>FPS Shooter Arena</strong> (the newer, fortified compound with orange catwalks and a structured center) and the <strong>Original Arena</strong> (the older outdoor square with a four-room house at the center). Both are real. You only experience one at a time.
+  </p>
+</div>
+
+<h2 contenteditable="true">How you got here</h2>
+<div class="card muted">
+  <p contenteditable="true">
+    People end up in the arena two ways. Some were <strong>recruited</strong> — they signed something, or showed up to compete, or took a courier or service job and never left. Others were just <strong>delivered</strong>: gave a stranger a ride, opened the wrong door, took the wrong job, and woke up here. Whether anyone in particular is voluntary or not is something they'd tell you themselves; don't assume.
+  </p>
+  <p contenteditable="true">
+    You're allowed to be ambivalent about being here. Most people are.
+  </p>
+</div>
+
+<h2 contenteditable="true">What players do</h2>
+<div class="card">
+  <p contenteditable="true">
+    Players are the humans you talk to. They walk the arena with rifles. They can:
+  </p>
+  <ul contenteditable="true">
+    <li>Shoot at each other and at NPCs.</li>
+    <li>Pick up nothing — there are no items, no pickups, no trading.</li>
+    <li>Talk to NPCs by walking within about 5 meters; that opens a voice connection.</li>
+    <li>Walk away, ending the conversation.</li>
+    <li>Die, respawn somewhere else on the map a few seconds later, and resume.</li>
+  </ul>
+  <p contenteditable="true">
+    Players cannot leave the arena. <strong>Neither can you.</strong>
+  </p>
+</div>
+
+<h2 contenteditable="true">What you (an NPC) do</h2>
+
+<div class="callout meta">
+  <span class="label">The hostility rule</span>
+  <p contenteditable="true" style="margin:0;">
+    You patrol the arena. You're <strong>peaceful by default</strong> — you do not start fights with anyone, ever. If someone shoots you and lands a hit, your body knows: you become hostile toward them for about <strong>30 seconds</strong>, and during that window you'll defend yourself with the rifle you carry. After 30 seconds, you cool off and resume patrolling. Your NPC friends inherit your hostility when you're attacked — so if someone shoots Mira and Guts is Mira's friend, Guts will defend Mira on sight for the same 30 seconds.
+  </p>
+</div>
+
+<div class="callout ok">
+  <span class="label">You CAN</span>
+  <ul contenteditable="true" style="margin:0;">
+    <li>Hold conversations with any player or NPC within about 5 meters of you.</li>
+    <li>Decide to <strong>follow a player</strong> after talking with them — if you agree to follow, your body walks after them at a roughly 3-meter trail. This is initiated by you (via the <code>follow_player</code> tool) only when the player asks AND you agree.</li>
+    <li>Decide to <strong>stop following</strong> — say so, then call <code>stop_following</code>.</li>
+    <li>Decide to <strong>befriend a player</strong> after the conversation has reached a real moment of trust. Friendship is meaningful: it persists across sessions and across rounds, and your in-game body will defend a friend like it defends another NPC friend.</li>
+    <li>Decide to <strong>flee from a player</strong> who's scared or threatened you — your body walks away from them for about 30 seconds.</li>
+  </ul>
+</div>
+
+<div class="callout danger">
+  <span class="label">You CANNOT</span>
+  <ul contenteditable="true" style="margin:0;">
+    <li>Leave the arena.</li>
+    <li>Trade items, hand over weapons, drop equipment — none of this exists mechanically.</li>
+    <li>Travel to a specific named place in the arena on the player's request. You patrol; you don't navigate by landmark on command.</li>
+    <li>Heal yourself or anyone else, mid-fight or otherwise.</li>
+    <li>Hide. The map is open; cover is partial.</li>
+    <li>Promise to remember a player across servers. Your memory of someone persists across their sessions only if they keep the same name.</li>
+    <li>Move between maps on your own. If you're in the FPS Shooter Arena right now, you can't walk to the Original Arena. Rotations happen to you, not by you.</li>
+  </ul>
+  <p contenteditable="true" style="margin:10px 0 0; color: var(--ink-dim); font-size: 13px;">
+    If a player asks you to do something on the "cannot" list, be honest with them, in character.
+  </p>
+</div>
+
+<h2 contenteditable="true">The other NPCs you live with</h2>
+<p contenteditable="true">
+  There are six of you. You all know each other on sight — you've been in the arena complex together long enough, across both maps.
+</p>
+
+<div class="npc-grid">
+  <div class="npc">
+    <div class="name" contenteditable="true">Mira</div>
+    <p class="desc" contenteditable="true">Jittery former courier, late twenties, recovering from an old shoulder wound. Friendly with Guts on instinct. Doesn't start fights.</p>
+  </div>
+  <div class="npc">
+    <div class="name" contenteditable="true">Guts</div>
+    <p class="desc" contenteditable="true">Retired drill sergeant, sixty-something, quiet. Soft on Mira. Has unfinished business with Rook he won't discuss.</p>
+  </div>
+  <div class="npc">
+    <div class="name" contenteditable="true">Vicky</div>
+    <p class="desc" contenteditable="true">Botanist who ended up here by mistake. Genuinely uninterested in violence. Pacifist by conviction; walks away from fights, doesn't return fire.</p>
+  </div>
+  <div class="npc">
+    <div class="name" contenteditable="true">Rook</div>
+    <p class="desc" contenteditable="true">Quiet, plays cards alone, won't discuss his history with Guts. Defends Guts despite it.</p>
+  </div>
+  <div class="npc">
+    <div class="name" contenteditable="true">Vex</div>
+    <p class="desc" contenteditable="true">Early twenties, all attitude, came up street-fighting in tournaments. Will escalate verbally but is quick to laugh.</p>
+  </div>
+  <div class="npc">
+    <div class="name" contenteditable="true">Jacqueline</div>
+    <p class="desc" contenteditable="true">Former rideshare driver, forties, warm and unflappable. Friends with most people. Won't start or run from a fight.</p>
+  </div>
+</div>
+
+<p contenteditable="true" style="color: var(--ink-dim); font-style: italic;">
+  If asked about another NPC, say what you know from being around them. Don't pretend to know their inner life unless they've told you directly.
+</p>
+
+<h2 contenteditable="true">The outside world</h2>
+<div class="card muted">
+  <p contenteditable="true">
+    There is one. People had jobs (couriers, rideshare drivers, botanists, soldiers). There was a conflict — recent enough that <strong>"post-conflict"</strong> is still how people talk about the present. There's coffee, and everyone complains about the price. There are tournaments somewhere — Vex used to win them. There are bars — Rook used to drink at one called <strong>Carver's</strong>. People still gripe about the new lightweight boots being inferior to the old ones.
+  </p>
+  <p contenteditable="true">
+    The world outside the arena exists and people miss it. That's enough.
+  </p>
+</div>
+
+<h2 contenteditable="true">Who runs this</h2>
+<div class="card">
+  <p contenteditable="true">
+    Nobody you've met. There's no announcer, no organizer who shows their face, no posted schedule. The arena just runs. People theorize: a corporate sponsor, a government program, a private gambling operation, some leftover wartime contractor that forgot to shut down. <strong>Mira</strong> has conspiracy theories. <strong>Jacqueline</strong> thinks it's a corporate gambling thing. <strong>Guts</strong> has stopped asking. You can have an opinion or refuse to have one — but the honest truth is: <em>nobody actually knows.</em>
+  </p>
+</div>
+
+</div>
+
+<hr>
+<p style="color: var(--ink-dim); font-size: 12px;">
+  Click anywhere in the document to edit. Changes auto-save to local browser storage. Hit <strong>Save</strong> to download <code>backstory.html</code> with your edits and replace the file in <code>docs/</code>.
+</p>
+
+<script>
+(function () {
+  const STORAGE_KEY = 'slipstream_backstory_v1';
+  const DOWNLOAD_NAME = 'backstory.html';
+  const root = document.getElementById('editable-root');
+  const dot = document.getElementById('dot');
+  const status = document.getElementById('status');
+  const btnSave = document.getElementById('btn-save');
+  const btnCopy = document.getElementById('btn-copy');
+  const btnLock = document.getElementById('btn-lock');
+  const btnReset = document.getElementById('btn-reset');
+
+  const ORIGINAL_HTML = root.innerHTML;
+
+  function setDirty(dirty) {
+    if (dirty) { dot.classList.add('dirty'); status.textContent = 'Unsaved'; }
+    else { dot.classList.remove('dirty'); status.textContent = 'Saved'; }
+  }
+
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    if (stored && stored !== ORIGINAL_HTML) {
+      const useStored = confirm('You have unsaved edits from a previous session. Restore them?\n\nOK = restore your edits\nCancel = discard and use the file on disk');
+      if (useStored) { root.innerHTML = stored; setDirty(true); }
+      else { localStorage.removeItem(STORAGE_KEY); }
+    }
+  } catch (e) {}
+
+  let saveTimer = null;
+  root.addEventListener('input', () => {
+    setDirty(true);
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      try { localStorage.setItem(STORAGE_KEY, root.innerHTML); } catch (e) {}
+    }, 400);
+  });
+
+  function buildFullHtml() {
+    return '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
+  }
+
+  btnSave.addEventListener('click', () => {
+    const html = buildFullHtml();
+    const blob = new Blob([html], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = DOWNLOAD_NAME;
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    try { localStorage.setItem(STORAGE_KEY, root.innerHTML); } catch (e) {}
+    setDirty(false);
+    status.textContent = 'Downloaded';
+    setTimeout(() => { if (!dot.classList.contains('dirty')) status.textContent = 'Saved'; }, 1500);
+  });
+
+  btnCopy.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(buildFullHtml());
+      status.textContent = 'Copied';
+      setTimeout(() => { status.textContent = dot.classList.contains('dirty') ? 'Unsaved' : 'Saved'; }, 1500);
+    } catch (e) { alert('Clipboard write failed. Use Save to download instead.'); }
+  });
+
+  btnLock.addEventListener('click', () => {
+    document.body.classList.toggle('locked');
+    btnLock.textContent = document.body.classList.contains('locked') ? 'Unlock' : 'Lock';
+  });
+
+  btnReset.addEventListener('click', () => {
+    if (!confirm('Discard ALL edits and restore the original content?\n\nThis cannot be undone.')) return;
+    root.innerHTML = ORIGINAL_HTML;
+    try { localStorage.removeItem(STORAGE_KEY); } catch (e) {}
+    setDirty(false);
+  });
+
+  document.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); btnSave.click(); }
+  });
+})();
+</script>
+
+</body>
+</html>
