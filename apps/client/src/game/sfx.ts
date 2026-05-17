@@ -3,6 +3,7 @@ const DRY_FIRE_URL = '/audio/dry-fire.mp3';
 const HIT_MARKER_URL = '/audio/hit-marker.mp3';
 const RELOAD_URL = '/audio/reload.mp3';
 const COFFEE_SIP_URL = '/audio/coffee-sip.mp3';
+const FOOTSTEP_URL = '/audio/footstep.mp3';
 
 const GUNSHOT_MAX_DIST = 60;
 const GUNSHOT_MIN_VOL = 0.05;
@@ -14,6 +15,20 @@ const RELOAD_MIN_VOL = 0;
 const RELOAD_BASE_VOL = 0.5;
 const COFFEE_SIP_MAX_DIST = 18;
 const COFFEE_SIP_BASE_VOL = 0.6;
+const FOOTSTEP_MAX_DIST = 25;
+// Muted pending tuning — see CLAUDE.md "Audio" section. Restore to 0.35 to
+// re-enable; the cadence ticker in Character.tsx still runs and bails on the
+// `gain <= 0` guard below, so flipping the volume alone brings footsteps back.
+const FOOTSTEP_BASE_VOL = 0;
+
+// Re-trigger the one-shot at these intervals so a faster gait = shorter
+// interval (pitch invariant), not playbackRate (which would chipmunk the
+// audio). Both exported so the Character cadence ticker can read them.
+export const FOOTSTEP_INTERVAL_WALK_MS = 500;
+export const FOOTSTEP_INTERVAL_RUN_MS = 333;
+// Speed floor: ignores residual numerical drift while idle so the ticker
+// doesn't accidentally fire when the player isn't actually moving.
+export const FOOTSTEP_MIN_SPEED = 0.5;
 
 const ONSET_THRESHOLD = 0.1;
 
@@ -103,6 +118,13 @@ export function playCoffeeSip(distance: number): void {
   const gain = t * COFFEE_SIP_BASE_VOL;
   if (gain <= 0) return;
   playBuffer(COFFEE_SIP_URL, gain);
+}
+
+export function playFootstep(distance: number): void {
+  const t = Math.max(0, Math.min(1, 1 - distance / FOOTSTEP_MAX_DIST));
+  const gain = t * FOOTSTEP_BASE_VOL;
+  if (gain <= 0) return;
+  playBuffer(FOOTSTEP_URL, gain);
 }
 
 export function playHitMarker(): void {
