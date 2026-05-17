@@ -1,7 +1,7 @@
 import { useState } from 'react';
 
 const STORAGE_KEY = 'slipstream-npc:consent';
-export const CONSENT_VERSION = 'v2';
+export const CONSENT_VERSION = 'v3';
 
 interface StoredConsent {
   version: string;
@@ -68,7 +68,8 @@ export const ConsentGate = ({ onAgree }: Props) => {
         <ul style={ul}>
           <li>When voice chat is active in this game, your microphone audio is sent to ElevenLabs and to the AI models that drive the NPCs. ElevenLabs and those model providers process and may retain that audio and the resulting transcripts under their own policies, which you can review on their respective websites.</li>
           <li>Transcripts are stored on our game server so NPCs can remember conversations across sessions, and so we can operate, debug, and improve the game. We do not retain raw audio ourselves.</li>
-          <li>You can mute your microphone at any time (M on keyboard, Y on Xbox controller). When muted, your audio is not transmitted.</li>
+          <li>You can mute your microphone at any time (M on keyboard, Start/Menu on Xbox controller). When muted, your audio is not transmitted. Voice activity detection also auto-mutes your microphone when you are not speaking, so background sound is not transmitted to other players.</li>
+          <li>When other human players are in the same room, your microphone audio is sent directly to those players' browsers over an encrypted peer-to-peer (WebRTC) connection. Audio does not transit our game server, but the connection-establishment messages do. Voice activity detection runs entirely in your browser using a small machine-learning model that is loaded from a public software CDN (jsdelivr.net) on first use; your microphone audio never leaves your device for that step.</li>
           <li>The exact mechanics of when and how voice is captured will change over time as we add features. This consent covers those future changes as well as the current behavior. If you do not want to consent to evolving voice features, do not proceed past this screen and do not use voice in this game.</li>
         </ul>
         <p style={pStrong}>Anything you say or do in this game may become public to other players. Treat the entire game as a public space:</p>

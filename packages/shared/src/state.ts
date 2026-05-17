@@ -51,6 +51,14 @@ export interface PlayerState {
   // place so the pickup→drink animation plays cleanly without sliding.
   // Stored on the wire so client prediction matches authoritative state.
   drinkingUntil?: number;
+  // Voice state — mirrored on the wire so every client knows who's speaking
+  // for the HUD speaker panel, nameplate badges, and (server-side) the
+  // turn-taking state machine that picks which NPC responds. Bots: always
+  // false. Filled from each client's VAD + manual mute key; PartyKit just
+  // relays the latest value into snapshots.
+  voiceSpeaking?: boolean;
+  voiceMutedByVad?: boolean;
+  voiceMutedManual?: boolean;
 }
 
 export interface HostilityEntry {

@@ -139,6 +139,20 @@ export const applyInput = (player: ServerPlayer, input: InputFrame, now: number)
     player.lastSeenSeq = input.seq;
     return;
   }
+  // Drink lock: while the coffee animation is playing, the body is frozen
+  // in place so the pickup→drink clip doesn't slide. Yaw/pitch still update
+  // so the camera (free-orbiting around the locked character) can be
+  // mouse-driven. Velocity zeroed every tick so any pre-drink momentum
+  // dies immediately. Lock duration matches the client's animation window
+  // (COFFEE.drinkLockMs).
+  if (player.drinkingUntil !== undefined && Date.now() < player.drinkingUntil) {
+    player.yaw = input.yaw;
+    player.pitch = input.pitch;
+    player.velocity = [0, 0, 0];
+    player.lastSeenSeq = input.seq;
+    player.lastIntegratedAt = now;
+    return;
+  }
   // Edge-trigger: if jump was pressed AND we're standing near a window we
   // can vault through, start the vault instead of running normal movement.
   if (input.jump && player.grounded) {
@@ -195,11 +209,18 @@ export const tryDrinkCoffee = (
   player.health = Math.min(PLAYER.maxHealth, player.health + COFFEE.healAmount);
   player.coffeeBuffUntil = Date.now() + COFFEE.buffDurationMs;
   player.lastCoffeeDrinkAt = Date.now();
+  // Movement lock for the full animation window (align + pickup + drink).
+  // applyInput zeroes velocity and skips applyMovement until this elapses,
+  // so the player can't slide around mid-sip.
+  player.drinkingUntil = Date.now() + COFFEE.drinkLockMs;
   // Drinking is a non-combat moment — drop combat aim back into casual stance
-  // for the duration of the animation so the pickup→drink clip reads cleanly.
-  // The Character.tsx state machine will route to the Drink clip via the
-  // emitted GameEvent; clearing pose just stops a stale lean/sit from layering.
-  if (player.pose !== 'casual_idle' && player.pose !== null) {
+  // for the duration of the animation so the pickup→drink clip reads cleanly
+  // AND the held rifle disappears (Character.tsx gates gun visibility on
+  // `pose === null`, so combat-mode drinkers would otherwise sip with the
+  // rifle still in hand). Done unconditionally: every drink ends up in
+  // casual_idle, regardless of whether the player was in combat, sitting,
+  // leaning, or dancing.
+  if (player.pose !== 'casual_idle' || player.poseTransition !== null) {
     clearPose(player);
     player.pose = 'casual_idle';
   }

@@ -581,6 +581,33 @@ export default class SlipstreamServer implements Party.Server {
         );
         return;
       }
+      case 'voice_state': {
+        // Mirror the sender's VAD + mute state into their PlayerState. The
+        // values ride along on the next snapshot so every other client can
+        // drive the SpeakerHUD + nameplate badges. Sent debounced from the
+        // client (transitions only), so this is cheap.
+        player.voiceSpeaking = msg.speaking && !msg.mutedManual;
+        player.voiceMutedByVad = msg.mutedByVad;
+        player.voiceMutedManual = msg.mutedManual;
+        return;
+      }
+      case 'webrtc_signal': {
+        // Dumb relay: forward to the addressed peer if they're connected and
+        // human. PartyKit's getConnection returns the Connection by id; the
+        // peers' connection ids are the same as PlayerState.id (assigned in
+        // onConnect). Drop silently for bots or unknown peers — there's no
+        // peer to negotiate with.
+        const targetConn = this.room.getConnection(msg.to);
+        if (!targetConn) return;
+        const targetPlayer = this.players.get(msg.to);
+        if (!targetPlayer || targetPlayer.isBot) return;
+        this.send(targetConn, {
+          type: 'webrtc_signal',
+          from: sender.id,
+          signal: msg.signal,
+        });
+        return;
+      }
     }
   }
 
@@ -885,6 +912,45 @@ export default class SlipstreamServer implements Party.Server {
 
   async onRequest(req: Party.Request): Promise<Response> {
     const url = new URL(req.url);
+
+    // Public lobby-state probe. Returns the room's locked settings (or
+    // unlocked defaults) plus the live human count so the lobby UI can
+    // decide whether the joining player gets to pick settings (empty room)
+    // or has to accept the host's choices (in-progress game). No auth —
+    // anyone who can see the room knows whether it's busy. CORS-open so
+    // the Vercel-hosted client can hit the PartyKit prod host directly.
+    if (req.method === 'OPTIONS') {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          'access-control-allow-origin': '*',
+          'access-control-allow-methods': 'GET, POST, PATCH, DELETE, OPTIONS',
+          'access-control-allow-headers': 'content-type',
+          'access-control-max-age': '86400',
+        },
+      });
+    }
+    if (req.method === 'GET' && url.pathname.endsWith('/lobby-state')) {
+      const humanCount = this.humanCount();
+      const body = {
+        ok: true,
+        room: this.room.id,
+        humanCount,
+        locked: this.killTargetLocked && this.botCountLocked,
+        killTarget: this.killTarget,
+        botCount: this.botCount,
+        botDifficulty: this.botDifficulty,
+        npcIds: this.roster.map((n) => n.id),
+      };
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: {
+          'content-type': 'application/json',
+          'access-control-allow-origin': '*',
+        },
+      });
+    }
+
     const expected = (this.room.env.ELEVENLABS_AGENT_TOOL_SECRET as string | undefined) ?? '';
     if (!expected) return jsonResponse({ error: 'tools disabled' }, 503);
 
@@ -2012,12 +2078,25 @@ export default class SlipstreamServer implements Party.Server {
 
   private resolveAgentId(npc: NpcDef): string | null {
     if (npc.agentId && !npc.agentId.startsWith('TODO_AGENT_ID_')) return npc.agentId;
+    // Per-NPC env var first, then a single-agent catch-all. Lets prod keep
+    // the real agent IDs in PartyKit env (room.env) and ship empty
+    // placeholders in source. Set via:
+    //   npx partykit env add ELEVENLABS_AGENT_ID_MIRA <agent_…>
+    const perNpcKey = `ELEVENLABS_AGENT_ID_${npc.id.toUpperCase()}`;
+    const perNpc = (this.room.env as Record<string, unknown>)[perNpcKey];
+    if (typeof perNpc === 'string' && perNpc.trim()) return perNpc.trim();
     const fallback = this.room.env.ELEVENLABS_AGENT_ID as string | undefined;
     return fallback && fallback.trim() ? fallback : null;
   }
 
   private async mintSignedUrl(agentId: string): Promise<string | null> {
     const apiKey = this.room.env.ELEVENLABS_API_KEY as string | undefined;
+    // Diagnostic: log what we can see about the env at the moment of need.
+    // Tail with `npx partykit tail` to read this from prod.
+    const envKeys = Object.keys(this.room.env as Record<string, unknown>);
+    console.log(
+      `[voice] mintSignedUrl: agent=${agentId} apiKey_present=${Boolean(apiKey)} apiKey_len=${apiKey?.length ?? 0} envKeys=[${envKeys.join(',')}]`,
+    );
     if (!apiKey) return null;
     try {
       const res = await fetch(
@@ -2025,10 +2104,11 @@ export default class SlipstreamServer implements Party.Server {
         { headers: { 'xi-api-key': apiKey } },
       );
       if (!res.ok) {
-        console.warn(`[voice] get-signed-url failed ${res.status} for agent ${agentId}`);
+        console.warn(`[voice] get-signed-url failed ${res.status} for agent ${agentId}: ${await res.text()}`);
         return null;
       }
       const body = (await res.json()) as { signed_url?: string };
+      console.log(`[voice] get-signed-url ok, url_present=${Boolean(body.signed_url)}`);
       return body.signed_url ?? null;
     } catch (err) {
       console.warn('[voice] get-signed-url threw:', err);
@@ -2255,4 +2335,16 @@ const stripServerOnly = (p: ServerPlayer) => ({
   pose: p.pose,
   poseTransition: p.poseTransition,
   danceVariant: p.danceVariant,
+  // Wire-visible coffee state. coffeeBuffUntil drives client prediction's
+  // sprint speed multiplier; drinkingUntil drives the client's movement
+  // lock during the animation so prediction matches server-authoritative
+  // freeze and there's no rubber-banding.
+  coffeeBuffUntil: p.coffeeBuffUntil,
+  drinkingUntil: p.drinkingUntil,
+  // Voice state mirrored from the player's last `voice_state` ClientMessage.
+  // Bots leave these unset → undefined on the wire → other clients render as
+  // not speaking. The SpeakerHUD + nameplate badges consume these directly.
+  voiceSpeaking: p.voiceSpeaking,
+  voiceMutedByVad: p.voiceMutedByVad,
+  voiceMutedManual: p.voiceMutedManual,
 });

@@ -9,6 +9,8 @@ import {
 } from '@slipstream-npc/shared';
 import { useGame } from '../store.js';
 import { handleConsentRequired, handleNpcAlert, handleNpcContext } from '../voice/manager.js';
+import { onServerSignal } from '../voice/webrtc-mesh.js';
+import { startVoiceRuntime, stopVoiceRuntime } from '../voice/voice-runtime.js';
 
 const urlHost =
   typeof window !== 'undefined'
@@ -91,6 +93,7 @@ export const connect = (
       useGame.getState().setCloseReason(reason || 'room full');
     }
     useGame.getState().setConn('disconnected');
+    stopVoiceRuntime();
   });
 
   socket.addEventListener('message', (event) => {
@@ -104,6 +107,7 @@ export const connect = (
     switch (msg.type) {
       case 'welcome':
         s.setMyId(msg.you);
+        void startVoiceRuntime(msg.you, (out) => socket.send(encode(out)));
         return;
       case 'snapshot':
         s.ingestSnapshot(msg.snapshot);
@@ -121,6 +125,9 @@ export const connect = (
         return;
       case 'consent_required':
         handleConsentRequired();
+        return;
+      case 'webrtc_signal':
+        onServerSignal(msg);
         return;
     }
   });

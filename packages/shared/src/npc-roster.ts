@@ -39,7 +39,7 @@ export const NPCS: readonly NpcDef[] = [
   {
     id: 'mira',
     name: 'Mira',
-    agentId: '',
+    agentId: 'agent_9801krpy616vebxvvy14n01gt8h8',
     // Was 'eve' — Eve's mesh shows visible bind-pose distortion in fire
     // poses (arms outstretched, rifle stuck to head). Falling back to
     // 'maria' (the only female model that renders cleanly under the
@@ -66,7 +66,7 @@ export const NPCS: readonly NpcDef[] = [
   {
     id: 'guts',
     name: 'Guts',
-    agentId: '',
+    agentId: 'agent_5901krpy62n4e2tvx6djx6wmzeac',
     // Switched from 'soldier' to 'dreyar' on 5/16 — Dreyar is a separate
     // Mixamo-rigged male mesh giving Guts visual identity distinct from
     // any other soldier-body bots that share the room.
@@ -92,7 +92,7 @@ export const NPCS: readonly NpcDef[] = [
   {
     id: 'fennel',
     name: 'Vicky',
-    agentId: '',
+    agentId: 'agent_5101krpy644hfy3bph9d4vy4he9t',
     characterId: 'maria',
     personality: [
       "Vicky is a botanist who took a job studying post-conflict ecology and ended up in the arena by mistake. She is genuinely delighted by plants and genuinely uninterested in violence. She's been here long enough to identify every species growing in the cracks and short enough that she still gets lost.",
@@ -116,7 +116,7 @@ export const NPCS: readonly NpcDef[] = [
   {
     id: 'rook',
     name: 'Rook',
-    agentId: '',
+    agentId: 'agent_2001krpy65pbfm09thxc7zx9sgk3',
     characterId: 'ch35',
     personality: [
       "Rook says less than he could. He plays cards alone — solitaire, mostly — when he's not patrolling. He has a history with Guts that he won't talk about even if you ask directly; he'll change the subject or just stop talking.",
@@ -139,7 +139,7 @@ export const NPCS: readonly NpcDef[] = [
   {
     id: 'vex',
     name: 'Vex',
-    agentId: '',
+    agentId: 'agent_8801krpy6712e4j90wecr06hj6vh',
     // Was 'medea' (broken bind pose), then 'eve' (also broken under fire
     // poses). Falling back to 'maria' — the only female model that
     // renders cleanly. Visual collision with Mira/Vicky is the cost.
@@ -166,7 +166,7 @@ export const NPCS: readonly NpcDef[] = [
   {
     id: 'jacqueline',
     name: 'Jacqueline',
-    agentId: '',
+    agentId: 'agent_8501krpy684nebgtg3eztqhkmf6j',
     characterId: 'ch15',
     personality: [
       "Jacqueline is a former rideshare driver in her forties who knows every story anyone's ever told her in a passenger seat at two in the morning. She has the unflappable warmth of someone who's heard worse than whatever you're about to say. Ended up in the arena because she gave a lift to the wrong person and the wrong person had keys to the wrong door. She is not upset about it — it's an adventure.",

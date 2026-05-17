@@ -40,6 +40,13 @@ export interface TranscriptLine {
   correction?: boolean;
 }
 
+// WebRTC signaling payload. The server is a dumb relay between two peers;
+// neither side inspects the SDP/ICE contents. Either `sdp` or `ice` is set
+// on a given message but not both. `to`/`from` are PartyKit connection ids.
+export type WebRtcSignal =
+  | { sdp: { type: 'offer' | 'answer'; sdp: string } }
+  | { ice: { candidate: string; sdpMid: string | null; sdpMLineIndex: number | null } | null };
+
 export type ClientMessage =
   | { type: 'hello'; name: string }
   | { type: 'input'; frames: InputFrame[] }
@@ -63,6 +70,26 @@ export type ClientMessage =
       pose: Pose;
       transition?: PoseTransition;
       danceVariant?: number;
+    }
+  // Local VAD + manual-mute state. Sent on transitions only (debounced), not
+  // every frame — server caches the last value into PlayerState so snapshots
+  // carry it to every other client. `speaking` is the live VAD bit;
+  // `mutedByVad` is the same bit inverted with grace applied for clarity in
+  // logs; `mutedManual` is the M-key hard mute.
+  | {
+      type: 'voice_state';
+      speaking: boolean;
+      mutedByVad: boolean;
+      mutedManual: boolean;
+    }
+  // WebRTC signaling relay. `to` is the destination peer's connection id
+  // (from a snapshot's PlayerState.id when isBot=false). Server checks the
+  // destination is a real human peer and forwards as a webrtc_signal
+  // ServerMessage with `from` set to the sender's connection id.
+  | {
+      type: 'webrtc_signal';
+      to: PlayerId;
+      signal: WebRtcSignal;
     };
 
 export type ServerMessage =
@@ -91,7 +118,15 @@ export type ServerMessage =
   // sendContextualUpdate. Used to feed in-game events to the active session
   // (damage taken, player ran away, kill score, etc.) so the agent can react
   // in voice. Text format: "[System: ...]".
-  | { type: 'npc_alert'; npcId: string; sessionId: string; text: string };
+  | { type: 'npc_alert'; npcId: string; sessionId: string; text: string }
+  // WebRTC signaling forwarded from another peer. `from` is the sender's
+  // connection id; client matches it against its peer-connection map and
+  // applies the SDP/ICE to that RTCPeerConnection.
+  | {
+      type: 'webrtc_signal';
+      from: PlayerId;
+      signal: WebRtcSignal;
+    };
 
 export const encode = <T>(msg: T): string => JSON.stringify(msg);
 export const decode = <T>(raw: string): T => JSON.parse(raw) as T;

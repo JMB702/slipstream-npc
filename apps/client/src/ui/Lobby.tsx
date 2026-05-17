@@ -12,6 +12,54 @@ import {
 import { useGame } from '../store.js';
 import { CLONE_PROMPT } from './clonePrompt.js';
 
+// PartyKit host resolution mirrors net/client.ts. Pulled local because the
+// lobby pre-probe runs before any socket connection — we don't want to
+// import the NetClient module just for the host string.
+const PARTY_HOST: string =
+  (typeof window !== 'undefined'
+    ? new URLSearchParams(window.location.search).get('host')
+    : null) ||
+  (import.meta.env.VITE_PARTYKIT_HOST as string | undefined) ||
+  'localhost:1999';
+
+// Use https when the page is https; ws/wss isn't relevant here (HTTP only).
+const PARTY_SCHEME =
+  typeof window !== 'undefined' && window.location.protocol === 'https:' ? 'https' : 'http';
+
+interface LobbyState {
+  humanCount: number;
+  locked: boolean;
+  killTarget: number;
+  botCount: number;
+  botDifficulty: BotDifficulty;
+  npcIds: string[];
+}
+
+const fetchLobbyState = async (mapId: MapId): Promise<LobbyState | null> => {
+  try {
+    const res = await fetch(
+      `${PARTY_SCHEME}://${PARTY_HOST}/parties/main/${mapId}/lobby-state`,
+      { method: 'GET' },
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as Partial<LobbyState>;
+    if (typeof data.humanCount !== 'number') return null;
+    return {
+      humanCount: data.humanCount,
+      locked: Boolean(data.locked),
+      killTarget: data.killTarget ?? MATCH.defaultKillTarget,
+      botCount: data.botCount ?? MATCH.defaultBotCount,
+      botDifficulty:
+        typeof data.botDifficulty === 'string' && isBotDifficulty(data.botDifficulty)
+          ? data.botDifficulty
+          : MATCH.defaultBotDifficulty,
+      npcIds: Array.isArray(data.npcIds) ? (data.npcIds as string[]) : [],
+    };
+  } catch {
+    return null;
+  }
+};
+
 interface Props {
   onJoin(args: {
     name: string;
@@ -35,10 +83,33 @@ export const Lobby = ({ onJoin }: Props) => {
   const [npcIds, setNpcIds] = useState<string[]>(() => loadNpcIds());
   const [accessCode, setAccessCode] = useState(() => loadCode());
   const [localError, setLocalError] = useState<string | null>(null);
+  const [roomState, setRoomState] = useState<LobbyState | null>(null);
   const closeReason = useGame((s) => s.lastCloseReason);
   const conn = useGame((s) => s.conn);
   const error = localError ?? closeReason;
   const codeOk = accessCode.length === ACCESS_CODE_LEN;
+  // True when the room already has a player and locked their settings. The
+  // joining player gets a streamlined form (name + access code + join);
+  // their host-settings inputs are ignored server-side anyway.
+  const joiningInProgress = roomState !== null && roomState.humanCount > 0;
+
+  // Probe the room every time the map dropdown changes. Re-probe on a short
+  // interval so a host who just joined while we're staring at the lobby
+  // gets reflected too. Cheap GET — single JSON object, no auth.
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      const s = await fetchLobbyState(mapId);
+      if (cancelled) return;
+      setRoomState(s);
+    };
+    void tick();
+    const handle = window.setInterval(tick, 4000);
+    return () => {
+      cancelled = true;
+      clearInterval(handle);
+    };
+  }, [mapId]);
 
   const parsedBotCount = useMemo(() => {
     const parsed = Math.floor(Number(botCount));
@@ -103,89 +174,111 @@ export const Lobby = ({ onJoin }: Props) => {
           </select>
         </label>
 
-        <label style={label}>
-          Kills to win
-          <input
-            style={input}
-            type="number"
-            inputMode="numeric"
-            min={MATCH.minKillTarget}
-            max={MATCH.maxKillTarget}
-            value={killTarget}
-            onChange={(e) => setKillTarget(e.target.value.replace(/[^0-9]/g, ''))}
-          />
-          <span style={hint}>
-            Locked by the first player in the room. {MATCH.minKillTarget}–{MATCH.maxKillTarget}.
-          </span>
-        </label>
+        {joiningInProgress ? (
+          <div style={progressNotice}>
+            <div style={progressTitle}>Game in progress on this map</div>
+            <div style={progressBody}>
+              {roomState!.humanCount} player{roomState!.humanCount === 1 ? '' : 's'} ·{' '}
+              {roomState!.botCount} bot{roomState!.botCount === 1 ? '' : 's'} ·{' '}
+              {roomState!.killTarget} kills to win
+              {roomState!.npcIds.length > 0 && (
+                <>
+                  {' '}· NPCs:{' '}
+                  {roomState!.npcIds
+                    .map((id) => NPCS.find((n) => n.id === id)?.name ?? id)
+                    .join(', ')}
+                </>
+              )}
+            </div>
+            <div style={progressHint}>
+              The first player to join picks the match settings. Drop in and play.
+            </div>
+          </div>
+        ) : (
+          <>
+            <label style={label}>
+              Kills to win
+              <input
+                style={input}
+                type="number"
+                inputMode="numeric"
+                min={MATCH.minKillTarget}
+                max={MATCH.maxKillTarget}
+                value={killTarget}
+                onChange={(e) => setKillTarget(e.target.value.replace(/[^0-9]/g, ''))}
+              />
+              <span style={hint}>
+                {MATCH.minKillTarget}–{MATCH.maxKillTarget}.
+              </span>
+            </label>
 
-        <label style={label}>
-          Bots
-          <input
-            style={input}
-            type="number"
-            inputMode="numeric"
-            min={MATCH.minBotCount}
-            max={MATCH.maxBotCount}
-            value={botCount}
-            onChange={(e) => setBotCount(e.target.value.replace(/[^0-9]/g, ''))}
-          />
-          <span style={hint}>
-            Enemy AI in the arena. {MATCH.minBotCount}–{MATCH.maxBotCount}. Locked by first player.
-          </span>
-        </label>
+            <label style={label}>
+              Bots
+              <input
+                style={input}
+                type="number"
+                inputMode="numeric"
+                min={MATCH.minBotCount}
+                max={MATCH.maxBotCount}
+                value={botCount}
+                onChange={(e) => setBotCount(e.target.value.replace(/[^0-9]/g, ''))}
+              />
+              <span style={hint}>
+                Enemy AI in the arena. {MATCH.minBotCount}–{MATCH.maxBotCount}.
+              </span>
+            </label>
 
-        {slotIds.length > 0 && (
-          <div style={{ marginTop: 16 }}>
-            <div style={{ fontSize: 13, opacity: 0.85 }}>NPC roster</div>
-            {slotIds.map((id, i) => (
+            {slotIds.length > 0 && (
+              <div style={{ marginTop: 16 }}>
+                <div style={{ fontSize: 13, opacity: 0.85 }}>NPC roster</div>
+                {slotIds.map((id, i) => (
+                  <select
+                    key={i}
+                    style={{ ...input, marginTop: 6 }}
+                    value={id}
+                    onChange={(e) => {
+                      const chosen = e.target.value;
+                      if (!NPCS.some((n) => n.id === chosen)) return;
+                      const next = [...slotIds];
+                      next[i] = chosen;
+                      setNpcIds(next);
+                    }}
+                  >
+                    {NPCS.map((n) => {
+                      const takenElsewhere = slotIds.some(
+                        (sid, j) => j !== i && sid === n.id,
+                      );
+                      return (
+                        <option key={n.id} value={n.id} disabled={takenElsewhere}>
+                          {n.name}
+                          {takenElsewhere ? ' (in use)' : ''}
+                        </option>
+                      );
+                    })}
+                  </select>
+                ))}
+                <span style={hint}>Pick exactly which NPCs spawn.</span>
+              </div>
+            )}
+
+            <label style={label}>
+              Bot difficulty
               <select
-                key={i}
-                style={{ ...input, marginTop: 6 }}
-                value={id}
+                style={input}
+                value={botDifficulty}
                 onChange={(e) => {
-                  const chosen = e.target.value;
-                  if (!NPCS.some((n) => n.id === chosen)) return;
-                  const next = [...slotIds];
-                  next[i] = chosen;
-                  setNpcIds(next);
+                  const v = e.target.value;
+                  if (isBotDifficulty(v)) setBotDifficulty(v);
                 }}
               >
-                {NPCS.map((n) => {
-                  const takenElsewhere = slotIds.some(
-                    (sid, j) => j !== i && sid === n.id,
-                  );
-                  return (
-                    <option key={n.id} value={n.id} disabled={takenElsewhere}>
-                      {n.name}
-                      {takenElsewhere ? ' (in use)' : ''}
-                    </option>
-                  );
-                })}
+                <option value="easy">Easy</option>
+                <option value="normal">Normal</option>
+                <option value="hard">Hard</option>
               </select>
-            ))}
-            <span style={hint}>
-              Pick exactly which NPCs spawn. Locked by the first player.
-            </span>
-          </div>
+              <span style={hint}>Easy: slow aim, big jitter, miss often. Hard: lethal.</span>
+            </label>
+          </>
         )}
-
-        <label style={label}>
-          Bot difficulty
-          <select
-            style={input}
-            value={botDifficulty}
-            onChange={(e) => {
-              const v = e.target.value;
-              if (isBotDifficulty(v)) setBotDifficulty(v);
-            }}
-          >
-            <option value="easy">Easy</option>
-            <option value="normal">Normal</option>
-            <option value="hard">Hard</option>
-          </select>
-          <span style={hint}>Easy: slow aim, big jitter, miss often. Hard: lethal.</span>
-        </label>
 
         <label style={label}>
           Access code
@@ -221,16 +314,26 @@ export const Lobby = ({ onJoin }: Props) => {
             saveName(finalName);
             saveCode(accessCode);
             saveMap(mapId);
+            // When joining an in-progress room, hand the server the room's
+            // own locked settings. Server already ignores conflicting URL
+            // params after lock, but matching the params keeps log
+            // diagnostics readable.
+            const useHost = joiningInProgress && roomState;
             const parsed = Math.floor(Number(killTarget));
-            const target = Number.isFinite(parsed)
-              ? Math.max(MATCH.minKillTarget, Math.min(MATCH.maxKillTarget, parsed))
-              : MATCH.defaultKillTarget;
+            const target = useHost
+              ? roomState.killTarget
+              : Number.isFinite(parsed)
+                ? Math.max(MATCH.minKillTarget, Math.min(MATCH.maxKillTarget, parsed))
+                : MATCH.defaultKillTarget;
             const parsedBots = Math.floor(Number(botCount));
-            const finalBots = Number.isFinite(parsedBots)
-              ? Math.max(MATCH.minBotCount, Math.min(MATCH.maxBotCount, parsedBots))
-              : MATCH.defaultBotCount;
-            const finalNpcIds = slotIds.slice(0, finalBots);
-            saveNpcIds(finalNpcIds);
+            const finalBots = useHost
+              ? roomState.botCount
+              : Number.isFinite(parsedBots)
+                ? Math.max(MATCH.minBotCount, Math.min(MATCH.maxBotCount, parsedBots))
+                : MATCH.defaultBotCount;
+            const finalNpcIds = useHost ? roomState.npcIds : slotIds.slice(0, finalBots);
+            const finalDifficulty = useHost ? roomState.botDifficulty : botDifficulty;
+            if (!useHost) saveNpcIds(finalNpcIds);
             useGame.getState().setCloseReason(null);
             setLocalError(null);
             onJoin({
@@ -239,7 +342,7 @@ export const Lobby = ({ onJoin }: Props) => {
               killTarget: target,
               accessCode,
               botCount: finalBots,
-              botDifficulty,
+              botDifficulty: finalDifficulty,
               npcIds: finalNpcIds,
             });
           }}
@@ -351,6 +454,30 @@ const hint: React.CSSProperties = {
   fontSize: 11,
   opacity: 0.55,
   fontWeight: 'normal',
+};
+
+const progressNotice: React.CSSProperties = {
+  marginTop: 16,
+  padding: '12px 14px',
+  background: 'rgba(58, 109, 255, 0.12)',
+  border: '1px solid rgba(58, 109, 255, 0.4)',
+  borderRadius: 4,
+};
+const progressTitle: React.CSSProperties = {
+  fontSize: 13,
+  fontWeight: 600,
+  color: '#bcd0ff',
+  marginBottom: 4,
+};
+const progressBody: React.CSSProperties = {
+  fontSize: 13,
+  opacity: 0.92,
+  lineHeight: 1.45,
+};
+const progressHint: React.CSSProperties = {
+  marginTop: 8,
+  fontSize: 11,
+  opacity: 0.55,
 };
 
 const cloneButton: React.CSSProperties = {

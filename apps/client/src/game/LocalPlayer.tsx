@@ -277,30 +277,49 @@ export const LocalPlayer = ({ send, myName }: Props) => {
       grounded: me.position[1] <= PLAYER.height / 2 + 0.001,
       coffeeBuffUntil: me.coffeeBuffUntil,
     };
-    for (const frame of inputBuffer.current) {
-      state = applyMovement(state, frame);
-    }
+    // Server freezes the body during a drink (see applyInput's drinkingUntil
+    // branch). Mirror it on the client so prediction doesn't fight the
+    // server-authoritative position and the player can't visibly slide
+    // around mid-sip. Yaw still updates so the camera can free-orbit.
+    const drinkingNow =
+      me.drinkingUntil !== undefined && Date.now() < me.drinkingUntil;
+    if (!drinkingNow) {
+      for (const frame of inputBuffer.current) {
+        state = applyMovement(state, frame);
+      }
 
-    // Extrapolate the partial frame between the last sent input and now
-    // so motion is continuous between 30Hz input ticks.
-    const partialDtMs = performance.now() - lastSent.current;
-    if (partialDtMs > 0 && live) {
-      state = applyMovement(state, {
-        seq: 0,
-        dtMs: partialDtMs,
-        forward: live.forward,
-        right: live.right,
-        jump: false,
-        sprint: live.sprint,
-        fire: false,
-        reload: false,
-        interact: false,
-        yaw: live.yaw,
-        pitch: live.pitch,
-        // Local-only prediction frame; never serialized over the wire.
-        aimOrigin: null,
-        aim: null,
-      });
+      // Extrapolate the partial frame between the last sent input and now
+      // so motion is continuous between 30Hz input ticks.
+      const partialDtMs = performance.now() - lastSent.current;
+      if (partialDtMs > 0 && live) {
+        state = applyMovement(state, {
+          seq: 0,
+          dtMs: partialDtMs,
+          forward: live.forward,
+          right: live.right,
+          jump: false,
+          sprint: live.sprint,
+          fire: false,
+          reload: false,
+          interact: false,
+          yaw: live.yaw,
+          pitch: live.pitch,
+          // Local-only prediction frame; never serialized over the wire.
+          aimOrigin: null,
+          aim: null,
+        });
+      }
+    } else {
+      // Drink lock: snap to the server's authoritative position and zero
+      // velocity. Yaw still tracks the mouse so camera orbit feels live.
+      state = {
+        position: me.position,
+        velocity: [0, 0, 0],
+        yaw: live?.yaw ?? me.yaw,
+        pitch: live?.pitch ?? me.pitch,
+        grounded: true,
+        coffeeBuffUntil: me.coffeeBuffUntil,
+      };
     }
 
     setPredictedState(state);
