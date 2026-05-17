@@ -6,3 +6,4 @@ export * from './maps.js';
 export * from './npc-roster.js';
 export * from './coffee.js';
 export * from './game-changes.js';
+export * from './world-bible.js';

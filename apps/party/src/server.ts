@@ -50,6 +50,8 @@ import { initialPlayer, randomSpawn, type ServerPlayer } from './state.js';
 import { ensureBotDefaults, tickBot } from './bots/controller.js';
 import { adoptHostility, clearHostility, pruneHostility } from './social.js';
 import { GameStorage, type NpcStateEntry } from './storage.js';
+import { VoiceOrchestrator, npcDefToCandidate } from './voice/orchestrator.js';
+import type { ArbCandidate } from './voice/arbitration.js';
 
 export const CONSENT_VERSION = 'v1';
 
@@ -79,21 +81,57 @@ type FeedbackEvent =
   | { kind: 'shot_fired'; shooterId: string; shooterIsBot: boolean; shooterNpcId?: string | null; targetName: string | null; hit: boolean; killed: boolean }
   | { kind: 'friendship_change'; npcId: string; playerName: string; delta: number; newScore: number; becameFriend: boolean }
   | { kind: 'nav_blocked'; npcId: string; goal: readonly [number, number, number]; state: string }
-  | { kind: 'feedback_signal'; playerName: string; trigger: string; text: string; npcId?: string; sessionId?: string };
+  | { kind: 'feedback_signal'; playerName: string; trigger: string; text: string; npcId?: string; sessionId?: string }
+  // Phase 2 scene-transcript line. Emitted on every finalized utterance from
+  // any human player's Deepgram stream, regardless of which NPC (if any) is
+  // in conversation with them. Distinct from a ConvAI `transcript` ringing
+  // through the legacy path — those are stored as per-(npc, player) memory.
+  // This event is the source of truth for "who said what when" in a
+  // multi-speaker room and feeds the Phase 3 arbitration prompt.
+  | { kind: 'scene_transcript'; speakerName: string; text: string; at: number }
+  // Phase 3 decoupled-NPC turn telemetry. arbitration_pick fires when the
+  // turn-state machine picks an NPC; npc_turn_start fires when the LLM
+  // request is issued; npc_first_audio carries the silence→first-audio
+  // latency; npc_turn_end / cancelled / error close the bracket. All five
+  // are useful in the feedback report and the verification latency target
+  // (1.8s p50 silence→first audio) is measured off npc_first_audio.t.
+  | { kind: 'arbitration_pick'; npcId: string; score: number; reasons: string[] }
+  | { kind: 'arbitration_empty'; sceneLineCount: number; candidateCount: number }
+  | { kind: 'arbitration_no_winner'; sceneLineCount: number; candidateCount: number; sceneSample: string }
+  | { kind: 'vad_transition'; playerName: string; speaking: boolean }
+  | { kind: 'npc_turn_start'; npcId: string; utteranceId: string; sceneLineCount: number }
+  | { kind: 'npc_first_audio'; npcId: string; utteranceId: string; firstChunkMs: number }
+  | { kind: 'npc_turn_end'; npcId: string; utteranceId: string; durationMs: number; text?: string }
+  | { kind: 'npc_turn_cancelled'; npcId: string; utteranceId: string; reason: string }
+  | { kind: 'npc_turn_aborted'; npcId: string; utteranceId: string; reason: string }
+  | { kind: 'npc_turn_error'; npcId: string; utteranceId: string; message: string };
 
-// Ring buffer of recent events for the /admin/sessions HTTP route. Survives
-// onMessage handlers (module-level state is per-DO isolate), drops on DO
-// hibernation/restart — fine for operator-side telemetry.
+// Ring buffer caps. Each lives on the Server instance (per-room) — in
+// prod each Cloudflare DO is its own isolate so module-level state is
+// already per-room, but `partykit dev` runs every room in one shared
+// workerd process, so module-level state bleeds across rooms (fps_shooter
+// utterances showing up in arena's session:last output, etc.). Instance
+// fields fix the dev experience without changing prod behavior.
 const RECENT_EVENT_CAP = 1000;
-const recentEvents: (FeedbackEvent & { t: number })[] = [];
+const SCENE_LINE_CAP = 500;
 const BOT_COFFEE_TRAVEL_TIMEOUT_MS = 60_000;
 
-const emit = (event: FeedbackEvent & { t?: number }): void => {
-  const full = { t: event.t ?? Date.now(), ...event };
-  console.log('[EVENT]', JSON.stringify(full));
-  recentEvents.push(full);
-  if (recentEvents.length > RECENT_EVENT_CAP) recentEvents.shift();
-};
+// Phase 2 scene transcript line — one entry per finalized Deepgram result.
+// Partials (low-latency interim hypotheses) are not persisted; they're
+// useful for live captions but would saturate the buffer.
+interface SceneLine {
+  at: number;
+  speakerName: string;
+  text: string;
+}
+
+// Per-connection cooldown for Deepgram token mints. The Deepgram token TTL
+// is ~30s; minting more often than that just burns API calls and would let
+// a misbehaving client churn the project budget. 25s gives a small renewal
+// overlap window before each token expires. This map IS still module-level
+// — connection ids are globally unique so no bleed between rooms.
+const STT_TOKEN_MIN_INTERVAL_MS = 25_000;
+const lastSttMint = new Map<string, number>();
 
 // Trigger phrases that flag a player utterance for the feedback report. Each
 // entry is a /pattern/ + short label; the report's LLM pass refines these
@@ -254,9 +292,49 @@ export default class SlipstreamServer implements Party.Server {
   // sessionId → wall-clock start, used to compute durationMs at session end
   // for the feedback pipeline. Not part of game state — pure telemetry.
   private voiceSessionStarts = new Map<string, number>();
+  // Per-room feedback-event ring buffer. Was module-level; moved to
+  // instance state so partykit dev (which shares one workerd across all
+  // rooms) doesn't mix events from fps_shooter into arena. In prod each
+  // DO is its own isolate so behavior is identical.
+  private recentEvents: (FeedbackEvent & { t: number })[] = [];
+  // Per-room scene transcript ring buffer (same reasoning as above).
+  private sceneTranscript: SceneLine[] = [];
+  // Phase 3 decoupled NPC orchestrator. Owns the turn-state machine + the
+  // LLM/TTS pipeline + audio broadcast. Created in onStart so room.env is
+  // available; disposed in onClose-when-empty-room flows.
+  private voice: VoiceOrchestrator;
+
+  // Instance-scoped event emitter. Same contract as the previous module
+  // function but pushes onto this room's buffer instead of a shared one.
+  // The [EVENT] stdout line is left as-is so the dev-log grep workflow
+  // still works.
+  private emit(event: FeedbackEvent & { t?: number }): void {
+    const full = { t: event.t ?? Date.now(), ...event };
+    console.log('[EVENT]', JSON.stringify(full));
+    this.recentEvents.push(full);
+    if (this.recentEvents.length > RECENT_EVENT_CAP) this.recentEvents.shift();
+  }
 
   constructor(readonly room: Party.Room) {
     this.store = new GameStorage(room.storage);
+    this.voice = new VoiceOrchestrator({
+      broadcast: (msg) => this.room.broadcast(encode<ServerMessage>(msg)),
+      getDecoupledCandidates: () => this.decoupledArbCandidates(),
+      getOtherNpcNames: (excludeId) => this.otherNpcNames(excludeId),
+      buildSelfStateLine: (npcId) => this.buildSelfStateLine(npcId),
+      getFriendshipScore: async (npcId, playerName) =>
+        (await this.store.getFriendship(npcId, playerName)).score,
+      getPersonaDeltas: (npcId) => this.store.getNpcState(npcId),
+      getSpeakerPosition: (speakerName) => this.findSpeakerPosition(speakerName),
+      getApiKeys: () => ({
+        anthropic: this.room.env.ANTHROPIC_API_KEY as string | undefined,
+        elevenlabs: this.room.env.ELEVENLABS_API_KEY as string | undefined,
+      }),
+      getMapId: () => (isMapId(this.room.id) ? this.room.id : DEFAULT_MAP_ID),
+      emit: (event) => this.emit(event as FeedbackEvent),
+      dispatchTool: (npcId, playerName, toolName, args) =>
+        this.dispatchTool(npcId, playerName, toolName, args),
+    });
   }
 
   onStart(): void {
@@ -518,7 +596,7 @@ export default class SlipstreamServer implements Party.Server {
           }
         }
         this.voiceSessionStarts.set(msg.sessionId, Date.now());
-        emit({
+        this.emit({
           kind: 'voice_session',
           phase: 'start',
           npcId: msg.npcId,
@@ -534,7 +612,7 @@ export default class SlipstreamServer implements Party.Server {
         const endedAt = Date.now();
         for (const p of this.players.values()) {
           if (p.isBot && p.botConversationWith === sender.id) {
-            emit({
+            this.emit({
               kind: 'voice_session',
               phase: 'end',
               npcId: p.npcId ?? 'unknown',
@@ -554,17 +632,36 @@ export default class SlipstreamServer implements Party.Server {
       }
       case 'transcript': {
         const playerName = player.name;
+        const handle = (): void => {
+          if (msg.npcId) {
+            // Legacy ConvAI per-NPC transcript path. Persists to durable
+            // per-(npc, player) storage so the NPC remembers across sessions.
+            this.acceptTranscript(msg.npcId, playerName, msg.line);
+            return;
+          }
+          // Phase 2 scene transcript: room-wide, multi-speaker. Only finals
+          // go into the ring buffer — partials are useful for live captions
+          // and (future) interrupt detection but would flood the buffer.
+          if (msg.final !== false) {
+            this.acceptSceneTranscript(
+              msg.speakerName ?? playerName,
+              msg.line,
+            );
+          }
+        };
         if (!this.liveConsent.has(playerName)) {
-          // The consent may live in storage from a prior session; check
-          // before dropping. Hot path consent check is fast in cache.
           void this.store.getConsent(playerName).then((rec) => {
             if (!rec) return;
             this.liveConsent.add(playerName);
-            this.acceptTranscript(msg.npcId, playerName, msg.line);
+            handle();
           });
           return;
         }
-        this.acceptTranscript(msg.npcId, playerName, msg.line);
+        handle();
+        return;
+      }
+      case 'stt_token_request': {
+        void this.handleSttTokenRequest(sender);
         return;
       }
       case 'set_pose': {
@@ -586,9 +683,22 @@ export default class SlipstreamServer implements Party.Server {
         // values ride along on the next snapshot so every other client can
         // drive the SpeakerHUD + nameplate badges. Sent debounced from the
         // client (transitions only), so this is cheap.
-        player.voiceSpeaking = msg.speaking && !msg.mutedManual;
+        const livelySpeaking = msg.speaking && !msg.mutedManual;
+        player.voiceSpeaking = livelySpeaking;
         player.voiceMutedByVad = msg.mutedByVad;
         player.voiceMutedManual = msg.mutedManual;
+        // Phase 3: the same transition drives the decoupled-NPC turn-state
+        // machine. Manual-mute suppresses VAD entirely so we don't trigger
+        // arbitration while the player is intentionally silent.
+        this.voice.onSpeakingChange(sender.id, livelySpeaking);
+        // Diagnostic: emit on every VAD transition so pnpm session:last
+        // surfaces whether the player's speech is reaching the server at
+        // all. Phase 5 will remove this once the pipeline is verified.
+        this.emit({
+          kind: 'vad_transition',
+          playerName: player.name,
+          speaking: livelySpeaking,
+        });
         return;
       }
       case 'webrtc_signal': {
@@ -612,6 +722,10 @@ export default class SlipstreamServer implements Party.Server {
   }
 
   onClose(conn: Party.Connection): void {
+    // Drop the closer from the Phase 3 turn-state machine so a crashed
+    // client doesn't pin the room in HUMAN_SPEAKING forever waiting on
+    // silence from a dead VAD.
+    this.voice.onCloseConnection(conn.id);
     // Release any bot still bound to this player as a conversation partner,
     // and break any follow/flee bindings keyed off this conn.
     const closer = this.players.get(conn.id);
@@ -642,7 +756,7 @@ export default class SlipstreamServer implements Party.Server {
         if (sid) {
           const startedAt = this.voiceSessionStarts.get(sid);
           this.voiceSessionStarts.delete(sid);
-          emit({
+          this.emit({
             kind: 'voice_session',
             phase: 'end',
             npcId: p.npcId ?? 'unknown',
@@ -1162,8 +1276,8 @@ export default class SlipstreamServer implements Party.Server {
         });
       }
     }
-    emit({ kind: 'tool_call', tool: 'make_friend', npcId: npc.id, playerName, ok: true });
-    emit({
+    this.emit({ kind: 'tool_call', tool: 'make_friend', npcId: npc.id, playerName, ok: true });
+    this.emit({
       kind: 'friendship_change',
       npcId: npc.id,
       playerName,
@@ -1183,14 +1297,14 @@ export default class SlipstreamServer implements Party.Server {
       (p) => !p.isBot && p.name === playerName,
     );
     if (!human) {
-      emit({ kind: 'tool_call', tool, npcId: npc.id, playerName, ok: false });
+      this.emit({ kind: 'tool_call', tool, npcId: npc.id, playerName, ok: false });
       return jsonResponse({ error: 'player not in room' }, 404);
     }
     const bot = Array.from(this.players.values()).find(
       (p) => p.isBot && p.npcId === npc.id,
     );
     if (!bot) {
-      emit({ kind: 'tool_call', tool, npcId: npc.id, playerName, ok: false });
+      this.emit({ kind: 'tool_call', tool, npcId: npc.id, playerName, ok: false });
       return jsonResponse({ error: 'npc not spawned' }, 404);
     }
     bot.botFollowing = follow ? human.id : null;
@@ -1199,7 +1313,7 @@ export default class SlipstreamServer implements Party.Server {
     // stale hold timer.
     bot.botFollowMoving = false;
     bot.botFollowHoldUntil = undefined;
-    emit({ kind: 'tool_call', tool, npcId: npc.id, playerName, ok: true });
+    this.emit({ kind: 'tool_call', tool, npcId: npc.id, playerName, ok: true });
     this.pushSelfStateAlert(
       bot,
       follow
@@ -1217,18 +1331,18 @@ export default class SlipstreamServer implements Party.Server {
       (p) => !p.isBot && p.name === playerName,
     );
     if (!human) {
-      emit({ kind: 'tool_call', tool: 'flee_from', npcId: npc.id, playerName, ok: false });
+      this.emit({ kind: 'tool_call', tool: 'flee_from', npcId: npc.id, playerName, ok: false });
       return jsonResponse({ error: 'player not in room' }, 404);
     }
     const bot = Array.from(this.players.values()).find(
       (p) => p.isBot && p.npcId === npc.id,
     );
     if (!bot) {
-      emit({ kind: 'tool_call', tool: 'flee_from', npcId: npc.id, playerName, ok: false });
+      this.emit({ kind: 'tool_call', tool: 'flee_from', npcId: npc.id, playerName, ok: false });
       return jsonResponse({ error: 'npc not spawned' }, 404);
     }
     bot.botFleeingFrom = { id: human.id, until: this.serverTime() + SOCIAL.hostilityMs };
-    emit({ kind: 'tool_call', tool: 'flee_from', npcId: npc.id, playerName, ok: true });
+    this.emit({ kind: 'tool_call', tool: 'flee_from', npcId: npc.id, playerName, ok: true });
     this.pushSelfStateAlert(bot, { kind: 'self_flee_started', playerName });
     return jsonResponse({ ok: true });
   }
@@ -1241,14 +1355,14 @@ export default class SlipstreamServer implements Party.Server {
       (p) => p.isBot && p.npcId === npc.id,
     );
     if (!bot) {
-      emit({ kind: 'tool_call', tool: 'stop_attacking', npcId: npc.id, playerName: targetName, args: { targetName }, ok: false });
+      this.emit({ kind: 'tool_call', tool: 'stop_attacking', npcId: npc.id, playerName: targetName, args: { targetName }, ok: false });
       return jsonResponse({ error: 'npc not spawned' }, 404);
     }
     const cleared = clearHostility(bot, targetName);
     const target = Array.from(this.players.values()).find((p) => p.name === targetName);
     if (target && bot.botTargetId === target.id) bot.botTargetId = null;
-    emit({ kind: 'tool_call', tool: 'stop_attacking', npcId: npc.id, playerName: targetName, args: { targetName }, ok: true });
-    if (cleared) emit({ kind: 'hostility_change', npcId: npc.id, towardsName: targetName, op: 'clear', source: 'tool' });
+    this.emit({ kind: 'tool_call', tool: 'stop_attacking', npcId: npc.id, playerName: targetName, args: { targetName }, ok: true });
+    if (cleared) this.emit({ kind: 'hostility_change', npcId: npc.id, towardsName: targetName, op: 'clear', source: 'tool' });
     this.pushSelfStateAlert(bot, { kind: 'self_attack_stopped', targetName, source: 'tool' });
     return jsonResponse({ ok: true, cleared, targetName });
   }
@@ -1263,22 +1377,22 @@ export default class SlipstreamServer implements Party.Server {
       (p) => p.isBot && p.npcId === npc.id,
     );
     if (!bot) {
-      emit({ kind: 'tool_call', tool: 'start_attacking', npcId: npc.id, playerName: targetName, args: { targetName }, ok: false });
+      this.emit({ kind: 'tool_call', tool: 'start_attacking', npcId: npc.id, playerName: targetName, args: { targetName }, ok: false });
       return jsonResponse({ error: 'npc not spawned' }, 404);
     }
     const target = Array.from(this.players.values()).find((p) => p.name === targetName);
     if (!target) {
-      emit({ kind: 'tool_call', tool: 'start_attacking', npcId: npc.id, playerName: targetName, args: { targetName }, ok: false });
+      this.emit({ kind: 'tool_call', tool: 'start_attacking', npcId: npc.id, playerName: targetName, args: { targetName }, ok: false });
       return jsonResponse({ error: 'target not in room' }, 404);
     }
     if (target.id === bot.id) {
-      emit({ kind: 'tool_call', tool: 'start_attacking', npcId: npc.id, playerName: targetName, args: { targetName }, ok: false });
+      this.emit({ kind: 'tool_call', tool: 'start_attacking', npcId: npc.id, playerName: targetName, args: { targetName }, ok: false });
       return jsonResponse({ error: 'cannot target self' }, 400);
     }
     const now = this.serverTime();
     adoptHostility(bot, targetName, now);
-    emit({ kind: 'tool_call', tool: 'start_attacking', npcId: npc.id, playerName: targetName, args: { targetName }, ok: true });
-    emit({ kind: 'hostility_change', npcId: npc.id, towardsName: targetName, op: 'set', source: 'tool', until: now + SOCIAL.hostilityMs });
+    this.emit({ kind: 'tool_call', tool: 'start_attacking', npcId: npc.id, playerName: targetName, args: { targetName }, ok: true });
+    this.emit({ kind: 'hostility_change', npcId: npc.id, towardsName: targetName, op: 'set', source: 'tool', until: now + SOCIAL.hostilityMs });
     this.pushSelfStateAlert(bot, { kind: 'self_attack_started', targetName, source: 'tool' });
     return jsonResponse({ ok: true, targetName });
   }
@@ -1290,16 +1404,16 @@ export default class SlipstreamServer implements Party.Server {
       (p) => p.isBot && p.npcId === npc.id,
     );
     if (!ok) {
-      emit({ kind: 'tool_call', tool: 'set_pose', npcId: npc.id, playerName: '', args: { pose: poseRaw }, ok: false });
+      this.emit({ kind: 'tool_call', tool: 'set_pose', npcId: npc.id, playerName: '', args: { pose: poseRaw }, ok: false });
       return jsonResponse({ error: `pose must be one of ${VALID_POSES.join(', ')}` }, 400);
     }
     if (!bot) {
-      emit({ kind: 'tool_call', tool: 'set_pose', npcId: npc.id, playerName: '', args: { pose: poseRaw }, ok: false });
+      this.emit({ kind: 'tool_call', tool: 'set_pose', npcId: npc.id, playerName: '', args: { pose: poseRaw }, ok: false });
       return jsonResponse({ error: 'npc not spawned' }, 404);
     }
     const target: Pose = poseRaw === 'clear' ? null : (poseRaw as Pose);
     applyAgentPose(bot, target, danceVariant, this.serverTime());
-    emit({
+    this.emit({
       kind: 'tool_call',
       tool: 'set_pose',
       npcId: npc.id,
@@ -1351,7 +1465,7 @@ export default class SlipstreamServer implements Party.Server {
     );
     if (!bot) {
       const botsInRoom = this.botInventory();
-      emit({
+      this.emit({
         kind: 'tool_call', tool, npcId: npc.id, playerName,
         args: { reason: 'npc_not_spawned', botsInRoom },
         ok: false,
@@ -1359,7 +1473,7 @@ export default class SlipstreamServer implements Party.Server {
       return jsonResponse({ error: 'npc not spawned', botsInRoom }, 404);
     }
     this.applyPatrolToBot(bot, sprint);
-    emit({ kind: 'tool_call', tool, npcId: npc.id, playerName, ok: true });
+    this.emit({ kind: 'tool_call', tool, npcId: npc.id, playerName, ok: true });
     this.pushSelfStateAlert(bot, { kind: 'self_patrol_started', sprint });
     return jsonResponse({ ok: true, sprint });
   }
@@ -1412,7 +1526,7 @@ export default class SlipstreamServer implements Party.Server {
     );
     if (!bot) {
       const botsInRoom = this.botInventory();
-      emit({
+      this.emit({
         kind: 'tool_call', tool: 'lean_wall', npcId: npc.id, playerName,
         args: { reason: 'npc_not_spawned', botsInRoom },
         ok: false,
@@ -1421,11 +1535,11 @@ export default class SlipstreamServer implements Party.Server {
     }
     const result = this.applyLeanTargetToBot(bot);
     if (result === null) {
-      emit({ kind: 'tool_call', tool: 'lean_wall', npcId: npc.id, playerName, args: { reason: 'no_wall' }, ok: false });
+      this.emit({ kind: 'tool_call', tool: 'lean_wall', npcId: npc.id, playerName, args: { reason: 'no_wall' }, ok: false });
       this.pushSelfStateAlert(bot, { kind: 'self_lean_no_wall' });
       return jsonResponse({ error: 'no wall within search radius', searchDist: BOT.leanSearchDist }, 404);
     }
-    emit({
+    this.emit({
       kind: 'tool_call', tool: 'lean_wall', npcId: npc.id, playerName,
       args: { walkDist: Number(result.walkDist.toFixed(2)), wallDist: Number(result.wallDist.toFixed(2)) },
       ok: true,
@@ -1465,14 +1579,14 @@ export default class SlipstreamServer implements Party.Server {
       (p) => p.isBot && p.npcId === npc.id,
     );
     if (!bot) {
-      emit({ kind: 'tool_call', tool: 'drink_coffee', npcId: npc.id, playerName, args: { source }, ok: false });
+      this.emit({ kind: 'tool_call', tool: 'drink_coffee', npcId: npc.id, playerName, args: { source }, ok: false });
       return { ok: false, status: 404, body: { error: 'npc not spawned' } };
     }
     // Coffee maker only exists on the fps_shooter map. The room id is the
     // map id (see onStart). Refuse the tool on other maps so the bot doesn't
     // path off into the void.
     if (this.room.id !== 'fps_shooter') {
-      emit({ kind: 'tool_call', tool: 'drink_coffee', npcId: npc.id, playerName, args: { source }, ok: false });
+      this.emit({ kind: 'tool_call', tool: 'drink_coffee', npcId: npc.id, playerName, args: { source }, ok: false });
       return { ok: false, status: 400, body: { error: 'no coffee maker on this map' } };
     }
     // Optional per-bot cooldown. Currently disabled for quick test loops, but
@@ -1480,7 +1594,7 @@ export default class SlipstreamServer implements Party.Server {
     if (COFFEE.cooldownMs > 0 && bot.lastCoffeeDrinkAt !== undefined) {
       const sinceMs = Date.now() - bot.lastCoffeeDrinkAt;
       if (sinceMs < COFFEE.cooldownMs) {
-        emit({ kind: 'tool_call', tool: 'drink_coffee', npcId: npc.id, playerName, args: { source }, ok: false });
+        this.emit({ kind: 'tool_call', tool: 'drink_coffee', npcId: npc.id, playerName, args: { source }, ok: false });
         return {
           ok: false,
           status: 429,
@@ -1519,7 +1633,7 @@ export default class SlipstreamServer implements Party.Server {
       kind: 'self_coffee_started',
       source,
     });
-    emit({
+    this.emit({
       kind: 'tool_call',
       tool: 'drink_coffee',
       npcId: npc.id,
@@ -1608,7 +1722,7 @@ export default class SlipstreamServer implements Party.Server {
             const wasKill = ev.hit
               ? fired.some((k) => k.type === 'kill' && k.victimId === ev.hit)
               : false;
-            emit({
+            this.emit({
               kind: 'shot_fired',
               shooterId: shooter.id,
               shooterIsBot: !!shooter.isBot,
@@ -1780,6 +1894,7 @@ export default class SlipstreamServer implements Party.Server {
       events: (FeedbackEvent & { t: number })[];
       npcState: Record<string, NpcStateEntry[]>;
     }>;
+    scene: Array<{ at: number; speakerName: string; text: string; kind: 'human' | 'npc' }>;
   }> {
     const SESSION_GAP_MS = 5 * 60_000;
     // List all transcript keys in this DO. Returns Map<key, value>.
@@ -1831,7 +1946,7 @@ export default class SlipstreamServer implements Party.Server {
         const npcs = [...new Set(s.lines.map((l) => l.npcId))];
         // Events whose timestamps fall within ±10s of the session window.
         // Captures the voice_session start/end and any tool_calls during.
-        const events = recentEvents.filter(
+        const events = this.recentEvents.filter(
           (e) => e.t >= startedAt - 10_000 && e.t <= endedAt + 10_000,
         );
         // NPC state as of session start — entries with at <= startedAt
@@ -1860,7 +1975,30 @@ export default class SlipstreamServer implements Party.Server {
       }),
     );
 
-    return { room: this.room.id, sessions: enriched };
+    // Tail of the scene transcript so multi-speaker rooms surface in
+    // pnpm session:last alongside legacy ConvAI sessions. Includes both
+    // human utterances (from Deepgram scene transcripts) and NPC turns
+    // (from npc_turn_end events) so the CLI renders the full dialogue,
+    // not just the player's side. Filter by player and since-window when
+    // provided to keep the response targeted.
+    const humanLines = this.sceneTranscript
+      .filter((l) => (opts.since ? l.at >= opts.since : true))
+      .filter((l) => (opts.playerFilter ? l.speakerName === opts.playerFilter : true))
+      .map((l) => ({ at: l.at, speakerName: l.speakerName, text: l.text, kind: 'human' as const }));
+    const npcLines = this.recentEvents
+      .filter((e): e is FeedbackEvent & { t: number; kind: 'npc_turn_end' } => e.kind === 'npc_turn_end')
+      .filter((e) => (opts.since ? e.t >= opts.since : true))
+      .map((e) => ({
+        at: e.t,
+        speakerName: npcById(e.npcId)?.name ?? e.npcId,
+        text: e.text ?? '',
+        kind: 'npc' as const,
+      }));
+    const scene = [...humanLines, ...npcLines]
+      .sort((a, b) => a.at - b.at)
+      .slice(-200);
+
+    return { room: this.room.id, sessions: enriched, scene };
   }
 
   private acceptTranscript(npcId: string, playerName: string, line: TranscriptLine): void {
@@ -1884,7 +2022,7 @@ export default class SlipstreamServer implements Party.Server {
       )?.botActiveSessionId;
       const trigger = matchFeedbackTrigger(text);
       if (trigger) {
-        emit({
+        this.emit({
           kind: 'feedback_signal',
           playerName,
           trigger,
@@ -1899,6 +2037,105 @@ export default class SlipstreamServer implements Party.Server {
       // platform did not emit the webhook.
       this.applyAgentTranscriptIntent(npcId, playerName, text);
     }
+  }
+
+  // Phase 2 scene-transcript accumulator. Pushes a finalized utterance into
+  // the room-wide ring buffer (used in Phase 3 by the arbitration engine to
+  // pick which NPC responds next), runs the feedback-regex trigger pass so
+  // bug-report keywords still show up in pnpm session:last, and emits a
+  // structured [EVENT] log line so the feedback report can attribute speech
+  // to the right speaker across players. No persistent storage — scene
+  // transcripts are live-only in v1; per-(npc, player) memory still flows
+  // through the legacy ConvAI path in the same case branch.
+  private acceptSceneTranscript(speakerName: string, line: TranscriptLine): void {
+    const text = (line.text ?? '').slice(0, 500).trim();
+    if (!text) return;
+    const entry: SceneLine = { at: line.at, speakerName, text };
+    this.sceneTranscript.push(entry);
+    if (this.sceneTranscript.length > SCENE_LINE_CAP) this.sceneTranscript.shift();
+    this.emit({
+      kind: 'scene_transcript',
+      speakerName,
+      text,
+      at: line.at,
+    });
+    // Phase 3: feed the orchestrator so arbitration sees this utterance
+    // the next time silence triggers a turn.
+    this.voice.onSceneTranscript({ at: line.at, speakerName, text });
+    const trigger = matchFeedbackTrigger(text);
+    if (trigger) {
+      this.emit({
+        kind: 'feedback_signal',
+        playerName: speakerName,
+        trigger,
+        text,
+      });
+    }
+  }
+
+  // Reply with a Deepgram-usable token over the same socket. The intended
+  // flow is to mint a short-lived access token via `/v1/auth/grant`, which
+  // keeps the project key server-side. In practice that endpoint requires
+  // a scope many keys don't have (Jeff's key 403s), so we fall back to
+  // returning the project key directly. That key reaches the browser —
+  // acceptable for local playtests but NOT for a public deploy. Track as
+  // a v1 limitation; the long-term fix is either a scoped key or a
+  // server-side proxy that keeps audio off PartyKit.
+  private async handleSttTokenRequest(sender: Party.Connection): Promise<void> {
+    const apiKey = this.room.env.DEEPGRAM_API_KEY as string | undefined;
+    if (!apiKey) {
+      this.send(sender, { type: 'stt_token', reason: 'deepgram-not-configured' });
+      return;
+    }
+    const last = lastSttMint.get(sender.id) ?? 0;
+    const sinceMs = Date.now() - last;
+    if (sinceMs < STT_TOKEN_MIN_INTERVAL_MS) {
+      this.send(sender, {
+        type: 'stt_token',
+        reason: `rate-limited; retry in ${Math.ceil((STT_TOKEN_MIN_INTERVAL_MS - sinceMs) / 1000)}s`,
+      });
+      return;
+    }
+    lastSttMint.set(sender.id, Date.now());
+    // Try the temp-token endpoint first. If it works (key has the
+    // auth:grant scope), we get a 30s TTL token. If it doesn't, fall
+    // back to the raw project key so the client can still stream.
+    try {
+      const res = await fetch('https://api.deepgram.com/v1/auth/grant', {
+        method: 'POST',
+        headers: {
+          Authorization: `Token ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: '{}',
+      });
+      if (res.ok) {
+        const body = (await res.json()) as { access_token?: string; expires_in?: number };
+        if (body.access_token) {
+          this.send(sender, {
+            type: 'stt_token',
+            token: body.access_token,
+            expiresInS: body.expires_in,
+          });
+          return;
+        }
+      } else {
+        const body = await res.text().catch(() => '');
+        console.warn(
+          `[stt] auth/grant ${res.status}: ${body.slice(0, 200)} — falling back to project key (local-dev only)`,
+        );
+      }
+    } catch (err) {
+      console.warn('[stt] auth/grant threw, falling back to project key:', err);
+    }
+    // Fallback: hand the project key to the client. Sufficient for the
+    // playtest path; replace with a scoped key or proxied audio path
+    // before public deploy.
+    this.send(sender, {
+      type: 'stt_token',
+      token: apiKey,
+      expiresInS: 0,
+    });
   }
 
   private isCoffeeCommitment(lower: string): boolean {
@@ -1981,14 +2218,14 @@ export default class SlipstreamServer implements Party.Server {
     if (leanWall) {
       const result = this.applyLeanTargetToBot(bot);
       if (result === null) {
-        emit({
+        this.emit({
           kind: 'tool_call', tool: 'lean_wall', npcId: npc.id, playerName,
           args: { source: 'transcript', reason: 'no_wall' },
           ok: false,
         });
         this.pushSelfStateAlert(bot, { kind: 'self_lean_no_wall' });
       } else {
-        emit({
+        this.emit({
           kind: 'tool_call', tool: 'lean_wall', npcId: npc.id, playerName,
           args: {
             source: 'transcript',
@@ -2014,7 +2251,7 @@ export default class SlipstreamServer implements Party.Server {
       );
     if (sprintPatrol) {
       this.applyPatrolToBot(bot, true);
-      emit({
+      this.emit({
         kind: 'tool_call', tool: 'sprint_patrol', npcId: npc.id, playerName,
         args: { source: 'transcript' },
         ok: true,
@@ -2024,7 +2261,7 @@ export default class SlipstreamServer implements Party.Server {
     }
     if (patrol) {
       this.applyPatrolToBot(bot, false);
-      emit({
+      this.emit({
         kind: 'tool_call', tool: 'patrol', npcId: npc.id, playerName,
         args: { source: 'transcript' },
         ok: true,
@@ -2050,6 +2287,15 @@ export default class SlipstreamServer implements Party.Server {
     }
     const npc = npcById(npcId);
     if (!npc) return;
+    // Phase 3: NPCs flagged useDecoupledStack do NOT open a ConvAI session.
+    // Their voice flows through the server-orchestrated turn-state machine
+    // (Anthropic LLM + ElevenLabs TTS streaming) instead. Reply with a
+    // shaped npc_context that has no agentId/signedUrl — the client's
+    // ConvAI manager treats that as "no session, just leave proximity UI
+    // alone." Drop silently here; mesh + STT + audio playback still work.
+    if (npc.useDecoupledStack) {
+      return;
+    }
     const agentId = this.resolveAgentId(npc);
     if (!agentId) {
       console.warn(
@@ -2293,6 +2539,128 @@ export default class SlipstreamServer implements Party.Server {
     );
 
     return lines.join('\n').slice(0, 8192);
+  }
+
+  // Phase 3 orchestrator context helpers. Each returns the slice of server
+  // state the VoiceOrchestrator needs for one decision or one prompt build.
+
+  // Bots whose NpcDef has useDecoupledStack=true, returned in ArbCandidate
+  // shape so the arbitration scoring function can consume them directly.
+  private decoupledArbCandidates(): ArbCandidate[] {
+    const out: ArbCandidate[] = [];
+    for (const p of this.players.values()) {
+      if (!p.isBot || !p.npcId) continue;
+      const def = npcById(p.npcId);
+      if (!def || !def.useDecoupledStack) continue;
+      out.push(npcDefToCandidate(def, p.position, p.alive));
+    }
+    return out;
+  }
+
+  // Display names of every alive bot except the one we're building a
+  // prompt for. Used so the chosen NPC's prompt can list its neighbors
+  // and chain-reaction detection has names to match against.
+  private otherNpcNames(excludeId: string): string[] {
+    const out: string[] = [];
+    for (const p of this.players.values()) {
+      if (!p.isBot || !p.npcId) continue;
+      if (p.npcId === excludeId) continue;
+      if (!p.alive) continue;
+      out.push(p.name);
+    }
+    return out;
+  }
+
+  // One-paragraph live-state summary for the prompt's "## Right now"
+  // section. Mirrors the equivalent block in buildMemoryBlob but as a
+  // single paragraph since scene-prompt.ts treats it as a unit.
+  private buildSelfStateLine(npcId: string): string {
+    const bot = Array.from(this.players.values()).find(
+      (p) => p.isBot && p.npcId === npcId,
+    );
+    if (!bot) return '';
+    const parts: string[] = [];
+    parts.push(`Your health: ${bot.health}/100. Your ammo: ${bot.ammo}.`);
+    if (bot.botFollowing) {
+      const target = this.players.get(bot.botFollowing);
+      if (target) parts.push(`You are following ${target.name}.`);
+    }
+    if (bot.botFleeingFrom) parts.push(`You are fleeing from someone.`);
+    if (bot.hostility.some((h) => h.until > this.serverTime())) {
+      parts.push(`You are HOSTILE to someone — they attacked you recently.`);
+    }
+    return parts.join(' ');
+  }
+
+  // Look up the position of the player who said something — by display
+  // name, since the scene-transcript wire format identifies speakers by
+  // name (not connection id). Used by arbitration's proximity scoring.
+  private findSpeakerPosition(speakerName: string): Vec3 | undefined {
+    for (const p of this.players.values()) {
+      if (p.isBot) continue;
+      if (p.name === speakerName) return p.position;
+    }
+    return undefined;
+  }
+
+  // Phase 4 tool dispatcher. Routes a Claude tool_use call into the same
+  // handlers the HTTP webhook routes use, with the (npc, playerName) pair
+  // resolved from args. Fire-and-forget — the orchestrator doesn't await
+  // a result; the handlers do their own [EVENT] emits + self-state alerts.
+  // Falls back to the primarySpeaker when args don't carry a player_name
+  // (some tools don't require one).
+  private dispatchTool(
+    npcId: string,
+    primarySpeaker: string | null,
+    toolName: string,
+    args: unknown,
+  ): void {
+    const npc = npcById(npcId);
+    if (!npc) return;
+    const argObj = (args && typeof args === 'object' ? args : {}) as Record<string, unknown>;
+    const playerName =
+      (typeof argObj.player_name === 'string' && argObj.player_name) ||
+      (typeof argObj.target_name === 'string' && argObj.target_name) ||
+      primarySpeaker ||
+      '';
+    try {
+      switch (toolName) {
+        case 'follow_player':
+          if (playerName) this.handleFollowTool(npc, playerName, true);
+          return;
+        case 'stop_following':
+          if (playerName) this.handleFollowTool(npc, playerName, false);
+          return;
+        case 'flee_from':
+          if (playerName) this.handleFleeTool(npc, playerName);
+          return;
+        case 'start_attacking':
+          if (playerName) this.handleStartAttackingTool(npc, playerName);
+          return;
+        case 'stop_attacking':
+          if (playerName) this.handleStopAttackingTool(npc, playerName);
+          return;
+        case 'make_friend':
+          if (playerName) void this.handleMakeFriendTool(npc, playerName);
+          return;
+        case 'patrol':
+          this.handlePatrolTool(npc, primarySpeaker ?? '', false);
+          return;
+        case 'sprint_patrol':
+          this.handlePatrolTool(npc, primarySpeaker ?? '', true);
+          return;
+        case 'lean_wall':
+          this.handleLeanWallTool(npc, primarySpeaker ?? '');
+          return;
+        case 'drink_coffee':
+          this.handleDrinkCoffeeTool(npc, primarySpeaker ?? '');
+          return;
+        default:
+          console.warn(`[dispatchTool] unknown tool ${toolName} from ${npcId}`);
+      }
+    } catch (err) {
+      console.warn(`[dispatchTool] ${toolName} for ${npcId} threw:`, err);
+    }
   }
 
   private serverTime(): number {

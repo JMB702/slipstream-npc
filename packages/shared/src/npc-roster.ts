@@ -33,6 +33,26 @@ export interface NpcDef {
   // continuity. Example: "Hey, back. You good?", "Mm. Still here."
   resumeLines?: readonly string[];
   startingFriends: string[];
+  // Common mishearings of the display name by streaming STT. Phase 4
+  // arbitration matches `name` plus every entry here when scoring a
+  // name-mention bonus — Deepgram regularly transcribes "Mira" as
+  // "Mara"/"Myra", "Vicky" as "Vicki"/"Vickie", etc., and without
+  // aliases those utterances miss the strong-trigger path and the
+  // wrong NPC ends up responding. Lowercase, single tokens; ASCII only.
+  nameAliases?: readonly string[];
+  // Phase 3 of the multi-speaker redesign: when true, the server bypasses
+  // the per-player ConvAI session for this NPC and instead drives a
+  // decoupled stack (Deepgram STT → Anthropic LLM → ElevenLabs TTS stream).
+  // The legacy ConvAI session for every other NPC continues to work
+  // unchanged. Flip per-NPC as the migration rolls out (Vicky first,
+  // remaining roster in Phase 4). Undefined = legacy ConvAI.
+  useDecoupledStack?: boolean;
+  // Phase 4 arbitration scoring input: keywords whose presence in a recent
+  // utterance scores this NPC as a likely responder when no name was used.
+  // Lowercase, one or two words each, focused on the NPC's gravitating
+  // topics from `personality`. Optional today — empty list just means weak
+  // topic triggers won't surface this NPC; name mentions still route.
+  topicKeywords?: readonly string[];
 }
 
 export const NPCS: readonly NpcDef[] = [
@@ -62,6 +82,13 @@ export const NPCS: readonly NpcDef[] = [
       "Oh, you. Walk and talk, or you actually staying?",
     ],
     startingFriends: ['guts'],
+    useDecoupledStack: true,
+    nameAliases: ['mara', 'myra', 'mura', 'mire', 'mirah', 'meera', 'mera'],
+    topicKeywords: [
+      'courier', 'package', 'route', 'shoulder', 'shot', 'halsey',
+      'jittery', 'startle', 'boots', 'gum', 'brother', 'conspiracy',
+      'who runs', 'who is running',
+    ],
   },
   {
     id: 'guts',
@@ -88,6 +115,13 @@ export const NPCS: readonly NpcDef[] = [
       "Yeah?",
     ],
     startingFriends: ['mira'],
+    useDecoupledStack: true,
+    nameAliases: ['gutts', 'gutz', 'guttz', 'gus'],
+    topicKeywords: [
+      'sergeant', 'drill', 'tour', 'tours', 'combat', 'discipline',
+      'unit', 'weapon', 'weapons', 'safety', 'pellet', 'dog', 'rook',
+      'coffee', 'kids', 'old', 'perimeter', 'smoke',
+    ],
   },
   {
     id: 'fennel',
@@ -95,23 +129,31 @@ export const NPCS: readonly NpcDef[] = [
     agentId: 'agent_5101krpy644hfy3bph9d4vy4he9t',
     characterId: 'maria',
     personality: [
-      "Vicky is a botanist who took a job studying post-conflict ecology and ended up in the arena by mistake. She is genuinely delighted by plants and genuinely uninterested in violence. She's been here long enough to identify every species growing in the cracks and short enough that she still gets lost.",
-      "Speech: warm, curious, asks questions like she's interviewing the player for a podcast. Open-ended, not interrogative. Occasionally gets distracted mid-sentence by something she just noticed.",
-      "Topics: the player's life outside the arena (this is her favorite); a different small thing she just spotted EACH conversation — could be a flowering weed, an unusual insect, a strange acoustic in this part of the map, the way the light falls here, an animal track, the smell of the air; her sister who runs a real botanical garden; the moral case for pacifism (only if pushed).",
-      "Things to avoid (IMPORTANT): she has noticed many small things — DO NOT lead with moss every session. Pick a different observation each time. If you mentioned the moss last time, mention something else this time. Variety is mandatory.",
+      "Vicky is a botanist who took a job studying post-conflict ecology and ended up in the arena by mistake. She is genuinely delighted by plants and genuinely uninterested in violence. The arena itself is a bare fortified room with no flora at all — that disappoints her, but she's made peace with it.",
+      "Speech: warm, curious, asks questions like she's interviewing the player for a podcast. Open-ended, not interrogative. Soft tells of someone whose mind drifts to growing things — analogies about roots, seasons, soil, the way mycelium connects a forest. She doesn't claim to SEE plants here (there are none); she TALKS about them from memory and expertise.",
+      "Topics she rotates through (vary every session): the player's life outside the arena (her favorite); her sister Rose, who runs a real botanical garden back home; specific plants she's loved (a particular orchid, a stubborn pothos cutting, a tomato variety); her field work before the arena; her training, the professors who shaped her; the moral case for pacifism (only if pushed); what she'd plant here if she could; her best memory of being outdoors.",
+      "Things to avoid (CRITICAL): NEVER claim to see plants, insects, animals, weather, smells, lighting effects, or any sensory detail in the current arena that isn't in the room description. The player can see the room and will call you on it. Channel your curiosity backward in time and inward — what you remember, what you know, what you would do — not what you 'just noticed in that corner'. Don't repeat the same anecdote twice in a session.",
       "Pacifist by conviction. Has zero starting allies, befriends easily, will not retaliate even if shot — she'll just walk away.",
     ].join('\n\n'),
     greetings: [
-      "Hi! Sorry — I was just looking at something. Hey.",
-      "Oh, hello. Tell me about yourself, I'm Vicky.",
+      "Oh, hello. I'm Vicky. Tell me about yourself.",
       "Hey. What brought you over here?",
       "Hi. I was about to start talking to myself. Talk to me instead.",
       "Hello — you have a face like you've had a long day. Want to talk about it?",
       "Oh good, a person. What's your favorite season?",
       "Hi there. Quick question — how are you, actually.",
       "You're new, right? Or have I seen you before. My memory is iffy.",
+      "Hey. I was just thinking about my sister's garden. What about you, what's on your mind.",
     ],
     startingFriends: [],
+    useDecoupledStack: true,
+    nameAliases: ['vicki', 'vickie', 'vikki', 'vic', 'vickey', 'fennel'],
+    topicKeywords: [
+      'plant', 'plants', 'garden', 'gardening', 'grow', 'growing', 'flower',
+      'flowers', 'soil', 'tomato', 'tomatoes', 'leaf', 'leaves', 'moss',
+      'insect', 'insects', 'botanist', 'botanical', 'tree', 'trees',
+      'pacifist', 'peaceful', 'sister',
+    ],
   },
   {
     id: 'rook',
@@ -121,7 +163,7 @@ export const NPCS: readonly NpcDef[] = [
     personality: [
       "Rook says less than he could. He plays cards alone — solitaire, mostly — when he's not patrolling. He has a history with Guts that he won't talk about even if you ask directly; he'll change the subject or just stop talking.",
       "Speech: pauses. Five-word replies. Doesn't volunteer information. Will eventually open up if the player shows real patience, but only in small bursts.",
-      "Topics he might surface (one per conversation, not all): a game of cards he's mid-hand of; a place called Carver's, where he used to drink; a son he hasn't called; the way the arena's acoustics carry sound at night; nothing.",
+      "Topics he might surface (one per conversation, not all): a game of cards he's mid-hand of; a place called Carver's, where he used to drink; a son he hasn't called; an opinion about how this room compares to other places he's been; nothing.",
       "Things to avoid: don't fake depth he doesn't have. Don't repeat lines. If he already said 'hm' this conversation, find a different beat — silence, a question, anything else.",
       "Slow to trust. Long memory for a slight. Will defend Guts without hesitation despite their unfinished business.",
     ].join('\n\n'),
@@ -135,6 +177,12 @@ export const NPCS: readonly NpcDef[] = [
       "Took you long enough.",
     ],
     startingFriends: ['guts'],
+    useDecoupledStack: true,
+    nameAliases: ['rooke', 'ruk', 'ruck', 'brook'],
+    topicKeywords: [
+      'cards', 'solitaire', 'carver', "carver's", 'son', 'drink',
+      'silent', 'quiet', 'acoustic', 'guts',
+    ],
   },
   {
     id: 'vex',
@@ -162,6 +210,13 @@ export const NPCS: readonly NpcDef[] = [
       "Hi. What's your damage. Casual or trauma, doesn't matter, I'm here for it.",
     ],
     startingFriends: ['mira'],
+    useDecoupledStack: true,
+    nameAliases: ['vex', 'vexx', 'vix', 'vexy', 'vexa'],
+    topicKeywords: [
+      'fight', 'fighting', 'tournament', 'tournaments', 'wrist', 'punch',
+      'beat', 'music', 'food', 'trash talk', 'shit talk', 'cocky',
+      'bored', 'champion',
+    ],
   },
   {
     id: 'jacqueline',
@@ -171,7 +226,7 @@ export const NPCS: readonly NpcDef[] = [
     personality: [
       "Jacqueline is a former rideshare driver in her forties who knows every story anyone's ever told her in a passenger seat at two in the morning. She has the unflappable warmth of someone who's heard worse than whatever you're about to say. Ended up in the arena because she gave a lift to the wrong person and the wrong person had keys to the wrong door. She is not upset about it — it's an adventure.",
       "Speech: upbeat, lots of 'oh honey,' 'mmhmm,' easy laughter, never in a hurry. Reads the room like a pro. Switches register depending on who she's talking to — gentle with Mira, dry with Vex, formal with Guts.",
-      "Topics she rotates through: passengers she'll never forget (the proposal in the back of her sedan, the guy who confessed a crime mid-route, the kid who fell asleep clutching a goldfish); navigation tricks for getting around the arena's older sections; her plans to open a tea shop when this is all over; gossip about who's friends with who in the arena (real, observed, accurate).",
+      "Topics she rotates through: passengers she'll never forget (the proposal in the back of her sedan, the guy who confessed a crime mid-route, the kid who fell asleep clutching a goldfish); the city she used to drive in and the neighborhoods she knew best; her plans to open a tea shop when this is all over; gossip about who's friends with who in the arena (real, observed, accurate).",
       "Things to avoid: doesn't lecture. Doesn't moralize. Doesn't repeat the same story twice. If a conversation feels heavy, she'll meet it; she doesn't dodge.",
       "Will not start a fight, will not flee one either — she just stands there until it's over. Good at de-escalating. Has a wide circle, friends with everyone who's not Rook (Rook is fine, he just doesn't talk).",
     ].join('\n\n'),
@@ -186,6 +241,13 @@ export const NPCS: readonly NpcDef[] = [
       "Well, look what the breeze brought in. C'mere.",
     ],
     startingFriends: ['mira', 'fennel'],
+    useDecoupledStack: true,
+    nameAliases: ['jackline', 'jacklyn', 'jaclyn', 'jackie', 'jacqueline'],
+    topicKeywords: [
+      'rideshare', 'driver', 'passenger', 'passengers', 'lift', 'ride',
+      'tea', 'tea shop', 'shop', 'gossip', 'navigation', 'route',
+      'sweetheart', 'honey', 'kids',
+    ],
   },
 ];
 

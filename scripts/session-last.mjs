@@ -70,19 +70,26 @@ const fetchRoom = async (room) => {
     const res = await fetch(url, { method: 'GET' });
     if (!res.ok) {
       console.error(`[${room}] HTTP ${res.status}: ${await res.text()}`);
-      return [];
+      return { room, sessions: [], scene: [] };
     }
     const body = await res.json();
-    return body.sessions ?? [];
+    return { room, sessions: body.sessions ?? [], scene: body.scene ?? [] };
   } catch (err) {
     console.error(`[${room}] fetch failed: ${err.message}`);
-    return [];
+    return { room, sessions: [], scene: [] };
   }
 };
 
-const all = (await Promise.all(ROOMS.map(fetchRoom))).flat();
+const fetched = await Promise.all(ROOMS.map(fetchRoom));
+const all = fetched.flatMap((r) => r.sessions);
 all.sort((a, b) => b.startedAt - a.startedAt);
 const top = all.slice(0, count);
+
+// Phase 2 scene transcripts: merged across rooms, sorted by speech time.
+// Tagged with room so a player roaming between maps stays attributable.
+const scene = fetched
+  .flatMap((r) => r.scene.map((l) => ({ ...l, room: r.room })))
+  .sort((a, b) => a.at - b.at);
 
 if (wantJson) {
   console.log(JSON.stringify(top, null, 2));
@@ -168,13 +175,35 @@ const renderSession = (s) => {
   return out.join('\n');
 };
 
-if (top.length === 0) {
-  console.log('_No sessions found._');
+const renderScene = (lines) => {
+  if (lines.length === 0) return null;
+  const out = [];
+  out.push(`## Scene transcript (multi-speaker) — ${lines.length} lines`);
+  out.push('');
+  for (const l of lines) {
+    const t = new Date(l.at).toLocaleTimeString();
+    const tag = l.kind === 'npc' ? '🤖' : '🎙';
+    const room = l.room ? ` _(${l.room})_` : '';
+    out.push(`- \`${t}\` ${tag} **${l.speakerName.toUpperCase()}**${room}: ${l.text}`);
+  }
+  return out.join('\n');
+};
+
+if (top.length === 0 && scene.length === 0) {
+  console.log('_No sessions or scene transcripts found._');
   if (player) console.log(`(Filtered to player=${player}; try without the filter.)`);
   process.exit(0);
 }
 
-console.log(`# Last ${top.length} session${top.length === 1 ? '' : 's'}`);
-console.log(`Queried rooms: ${ROOMS.join(', ')}. Returned ${top.length} of ${all.length} candidates.`);
-console.log('');
-for (const s of top) console.log(renderSession(s));
+if (top.length > 0) {
+  console.log(`# Last ${top.length} session${top.length === 1 ? '' : 's'}`);
+  console.log(`Queried rooms: ${ROOMS.join(', ')}. Returned ${top.length} of ${all.length} candidates.`);
+  console.log('');
+  for (const s of top) console.log(renderSession(s));
+}
+
+const sceneRendered = renderScene(scene);
+if (sceneRendered) {
+  console.log('');
+  console.log(sceneRendered);
+}

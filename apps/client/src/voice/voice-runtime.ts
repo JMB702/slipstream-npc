@@ -4,6 +4,8 @@ import { isMuted, onMuteChange } from './mute.js';
 import { onVadChange, setVadMuted, startVad, stopVad } from './vad.js';
 import { onPeerTrack, startMesh, stopMesh, syncPeers } from './webrtc-mesh.js';
 import { attachPeerStream, setPeerPosition } from './player-audio-graph.js';
+import { startPlayerStt, stopPlayerStt } from './player-stt.js';
+import { setNpcAudioPosition, teardownNpcAudio } from './npc-audio-playback.js';
 
 // Top-level orchestrator for Phase 1 player voice. Owns three concerns:
 //
@@ -72,13 +74,22 @@ const updatePeerPositions = (): void => {
   const snap = state.snapshots[state.snapshots.length - 1];
   if (!snap || !myId) return;
   for (const p of snap.players.values()) {
-    if (p.isBot || p.id === myId) continue;
+    if (p.id === myId) continue;
+    if (p.isBot) {
+      // Phase 3: NPC voice is positional too. We don't know server-side which
+      // bots are decoupled-stack here, but setNpcAudioPosition is a no-op for
+      // bots that never received an audio chunk (no slot exists), so it's
+      // safe to call for every bot every snapshot.
+      if (p.npcId) setNpcAudioPosition(p.npcId, p.position);
+      continue;
+    }
     setPeerPosition(p.id, p.position);
   }
 };
 
 export const startVoiceRuntime = async (
   myId: string,
+  myName: string,
   netSend: (msg: ClientMessage) => void,
 ): Promise<void> => {
   if (started) return;
@@ -95,6 +106,11 @@ export const startVoiceRuntime = async (
   // is denied or the model fails to load, mesh stays alive but VAD output
   // is permanently silent (matches "user has no mic" UX).
   void startVad();
+
+  // Phase 2: server-side scene transcripts via Deepgram. Soft-fails if the
+  // server has no DEEPGRAM_API_KEY — the runtime logs and continues
+  // without STT (mesh + VAD still work).
+  void startPlayerStt(myName, netSend);
 
   unsubVad = onVadChange((speaking) => {
     sendVoiceState(netSend, speaking);
@@ -131,6 +147,8 @@ export const stopVoiceRuntime = (): void => {
   unsubPeerTrack?.();
   unsubVad = unsubMute = unsubSnapshot = unsubPeerTrack = null;
   lastSent = null;
+  stopPlayerStt();
   stopVad();
   stopMesh();
+  teardownNpcAudio();
 };

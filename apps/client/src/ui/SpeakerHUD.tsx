@@ -3,6 +3,7 @@ import { useFrame } from '@react-three/fiber';
 import { Vector3 } from 'three';
 import { useGame } from '../store.js';
 import type { PlayerState, Vec3 } from '@slipstream-npc/shared';
+import { getSpeakingNpcIds } from '../voice/npc-audio-playback.js';
 
 // Top-right speaker panel. With the proximity-gated voice system removed in
 // the multi-speaker redesign, you can hear another player from anywhere on
@@ -29,6 +30,8 @@ interface SpeakerRow {
   // wall-clock ms when speaking last flipped to false; used to fade out
   // the row 1.5s after silence.
   lastSpokeAt: number;
+  // 'player' or 'npc' — drives the [NPC] persona-color chip in Phase 4.
+  kind: 'player' | 'npc';
 }
 
 const FADE_OUT_MS = 1500;
@@ -116,9 +119,31 @@ export const SpeakerHUD = () => {
     if (!snap) return [];
     const out: SpeakerRow[] = [];
     const now = Date.now();
+    // Phase 3+: NPC rows are driven by the audio playback module's "is a
+    // chunk source currently playing for this npcId" set. Keyed by npcId
+    // (e.g. 'fennel' for Vicky), looked up against snapshot positions.
+    const speakingNpcSet = new Set(getSpeakingNpcIds());
     snap.players.forEach((p: PlayerState) => {
-      if (p.isBot) return;
       if (p.id === myId) return;
+      // Bots only surface when they have an active audio utterance — the
+      // server is the source of truth for whether an NPC is speaking; bots
+      // without a live chunk stream are silent.
+      if (p.isBot) {
+        const speaking = !!(p.npcId && speakingNpcSet.has(p.npcId));
+        if (speaking) lastSpokeAtRef.current.set(p.id, now);
+        const lastSpokeAt = lastSpokeAtRef.current.get(p.id) ?? 0;
+        const visible = speaking || now - lastSpokeAt < FADE_OUT_MS;
+        if (!visible) return;
+        out.push({
+          id: p.id,
+          name: p.name,
+          pos: p.position,
+          speaking,
+          lastSpokeAt,
+          kind: 'npc',
+        });
+        return;
+      }
       const speaking = p.voiceSpeaking === true;
       if (speaking) lastSpokeAtRef.current.set(p.id, now);
       const lastSpokeAt = lastSpokeAtRef.current.get(p.id) ?? 0;
@@ -130,6 +155,7 @@ export const SpeakerHUD = () => {
         pos: p.position,
         speaking,
         lastSpokeAt,
+        kind: 'player',
       });
     });
     return out;
@@ -160,6 +186,7 @@ export const SpeakerHUD = () => {
           >
             <span style={micIconStyle}>🎙</span>
             <span style={nameStyle}>{r.name}</span>
+            {r.kind === 'npc' && <span style={npcChipStyle}>NPC</span>}
             {proj && !proj.onscreen && (
               <span
                 style={{
@@ -231,4 +258,14 @@ const distStyle: React.CSSProperties = {
   color: '#9aa3b2',
   fontSize: 11,
   fontVariantNumeric: 'tabular-nums',
+};
+
+const npcChipStyle: React.CSSProperties = {
+  fontSize: 9,
+  fontWeight: 700,
+  letterSpacing: '0.06em',
+  padding: '1px 5px',
+  borderRadius: 4,
+  background: 'rgba(168, 140, 255, 0.22)',
+  color: 'rgb(196, 178, 255)',
 };

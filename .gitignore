@@ -21,5 +21,7 @@ Characters/
 # 3D source assets (RAR/FBX/blend) — kept locally, never committed.
 3D Assets/
 /Maps/
+# Raw SFX sources — the in-game files live in apps/client/public/audio/.
+Audio/
 logs/
 .vercel

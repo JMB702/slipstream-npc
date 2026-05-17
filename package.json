@@ -19,6 +19,7 @@
     "extract:nav": "node scripts/extract-map-nav.mjs",
     "catalogue": "node scripts/animation-catalogue.mjs",
     "bake:characters": "node scripts/bake-character-glb.mjs",
+    "bake:bible": "node scripts/bake-world-bible.mjs",
     "feedback:report": "node scripts/feedback-report.mjs",
     "sync:kb": "node scripts/upload-knowledge-base.mjs",
     "npc:state": "node scripts/set-npc-state.mjs",

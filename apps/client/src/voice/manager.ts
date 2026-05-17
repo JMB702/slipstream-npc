@@ -193,6 +193,11 @@ const startSession = async (npcId: string): Promise<void> => {
   if (!deps || starting || active) return;
   const npc = npcById(npcId);
   if (!npc) return;
+  // Phase 3: decoupled-stack NPCs handle their voice through the
+  // server-orchestrated turn-state machine. Proximity still matters for
+  // arbitration (NPC must be in the room for the player to address her),
+  // but no per-player ConvAI session is opened.
+  if (npc.useDecoupledStack) return;
   starting = true;
   const sessionId = `s_${Math.random().toString(36).slice(2, 10)}`;
   try {

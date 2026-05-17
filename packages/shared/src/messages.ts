@@ -59,7 +59,31 @@ export type ClientMessage =
   // 'sdk_error' (SDK reported an error), 'manual' (explicit hangup). Omitted
   // = 'manual'. The server forwards this verbatim into the feedback pipeline.
   | { type: 'voice_session_end'; sessionId: string; reason?: string }
-  | { type: 'transcript'; npcId: string; sessionId: string; line: TranscriptLine }
+  // Transcript line from one of two sources:
+  //   (a) Legacy ConvAI per-NPC session — `npcId` + `sessionId` are present;
+  //       `final`/`speakerName` may be omitted. The server treats it as
+  //       persistent per-(npc, player) memory and feeds it into memoryBlob
+  //       for the next session.
+  //   (b) Scene transcript (Phase 2+) from the player's own Deepgram STT
+  //       stream — `npcId`/`sessionId` omitted; `final` distinguishes
+  //       partials from finalized utterances; `speakerName` carries the
+  //       sender's player name so the server can attribute speech without
+  //       additional lookups. Scene transcripts feed the room-wide ring
+  //       buffer that drives turn-taking arbitration in later phases.
+  | {
+      type: 'transcript';
+      npcId?: string;
+      sessionId?: string;
+      line: TranscriptLine;
+      final?: boolean;
+      speakerName?: string;
+    }
+  // Request a short-lived Deepgram token. Server mints it via the project
+  // API key and replies with stt_token. Per-connection rate-limited to one
+  // mint every ~25s so a misbehaving client can't burn through the project
+  // budget. No payload needed — the responding socket already identifies
+  // the requester.
+  | { type: 'stt_token_request' }
   // Set the local player's expressive pose. Sent by the local client (debug
   // keys, future UI) for the controlled player. Voice agents drive NPC poses
   // server-side via the /tools/set_pose webhook, not via this channel.
@@ -126,6 +150,47 @@ export type ServerMessage =
       type: 'webrtc_signal';
       from: PlayerId;
       signal: WebRtcSignal;
+    }
+  // Reply to stt_token_request. `token` is a short-lived Deepgram access
+  // token (default TTL ~30s) for use with the Deepgram streaming API. The
+  // client passes it as the second WebSocket subprotocol entry per
+  // Deepgram's browser auth pattern. `reason` is set instead when the
+  // server can't mint (no DEEPGRAM_API_KEY, rate-limited, or upstream
+  // failure) so the client can log a clear error and skip STT for the
+  // session.
+  | {
+      type: 'stt_token';
+      token?: string;
+      expiresInS?: number;
+      reason?: string;
+    }
+  // Phase 3 decoupled NPC audio chunk. Streamed mid-utterance from the
+  // server's per-NPC TTS pipeline (ElevenLabs WS). One chunk every
+  // ~100-300ms. Clients decode + enqueue on a per-NPC AudioBufferSource
+  // chain, routed through a PannerNode positioned at the NPC's snapshot
+  // location. `mime` describes the chunk's container (usually
+  // 'audio/mpeg' for ElevenLabs MP3 stream). `b64` is the chunk payload
+  // (base64). `chunkIdx` is monotonic per (npcId, utterance) — clients
+  // gate on it to drop out-of-order chunks. `isFinal=true` marks the last
+  // chunk so the client can release the buffer when playback completes.
+  | {
+      type: 'npc_audio_chunk';
+      npcId: string;
+      utteranceId: string;
+      chunkIdx: number;
+      mime: string;
+      b64: string;
+      isFinal: boolean;
+    }
+  // Phase 3 barge-in / interrupt. Server sends this when a player starts
+  // speaking during NPC_SPEAKING — clients clear the named NPC's audio
+  // queue immediately. `utteranceId` is the cancelled utterance; clients
+  // can use it to ignore stragglers from the same utterance that arrive
+  // after the stop (mid-flight chunks).
+  | {
+      type: 'npc_audio_stop';
+      npcId: string;
+      utteranceId: string;
     };
 
 export const encode = <T>(msg: T): string => JSON.stringify(msg);

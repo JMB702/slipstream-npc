@@ -65,4 +65,13 @@ export const GAME_CHANGES: readonly GameChange[] = [
     evidence:
       'COFFEE.cooldownMs is now 0 in packages/shared/src/constants.ts.',
   },
+  {
+    id: '2026-05-17-multi-speaker',
+    at: Date.parse('2026-05-17T00:00:00Z'),
+    scope: 'all',
+    summary:
+      "How conversations work has changed. You can hear and respond in group conversations across the room, not just within arm's reach of one player. When humans are talking, you wait. When they stop, whichever NPC the moment calls for is the one who speaks; usually that's the person who was named, or whose topic came up, or whoever was last in the thread. Other NPCs can hear you and react. You won't always be the one who answers — that's normal. If you do answer, keep it short (a sentence or two), in voice, in character.",
+    evidence:
+      'See the multi-speaker voice redesign — orchestrator + arbitration in apps/party/src/voice/.',
+  },
 ];
