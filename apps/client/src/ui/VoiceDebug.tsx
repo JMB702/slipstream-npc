@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useGame } from '../store.js';
+import { getMeshState } from '../voice/webrtc-mesh.js';
+import { getAudioGraphState } from '../voice/player-audio-graph.js';
 
 // Minimal voice-state HUD. Shows whether a session is open, current SDK
 // status, last error, and live input/output volume bars. Diagnostic-only —
@@ -43,6 +45,55 @@ export const VoiceDebug = () => {
       {lastError && (
         <div style={err}>{lastError}</div>
       )}
+      <MeshDebug />
+    </div>
+  );
+};
+
+const MeshDebug = () => {
+  const mesh = getMeshState();
+  const audio = getAudioGraphState();
+  // The ctx state is the load-bearing line for "why no audio"; color the
+  // value so it's instantly readable across the room.
+  const ctxColor =
+    audio.ctxState === 'running'
+      ? '#5fff8f'
+      : audio.ctxState === 'suspended'
+        ? '#ffae3b'
+        : '#ff6a6a';
+  return (
+    <div style={{ marginTop: 8, paddingTop: 6, borderTop: '1px solid #2a2f4a' }}>
+      <div style={row}>
+        <span style={lbl}>audio</span>
+        <span style={{ ...val, color: ctxColor }}>{audio.ctxState ?? 'never created'}</span>
+      </div>
+      <div style={row}>
+        <span style={lbl}>mesh</span>
+        <span style={val}>
+          {mesh.started ? `${mesh.peers.length} peer(s)` : 'not started'}
+        </span>
+      </div>
+      {mesh.peers.map((p) => {
+        const slot = audio.slots.find((s) => s.peerId === p.peerId);
+        const connColor =
+          p.connectionState === 'connected'
+            ? '#5fff8f'
+            : p.connectionState === 'failed' || p.connectionState === 'disconnected'
+              ? '#ff6a6a'
+              : '#ffae3b';
+        return (
+          <div key={p.peerId} style={peerRow}>
+            <div style={peerHead}>
+              <span style={peerLabel}>{p.peerId.slice(0, 6)}</span>
+              <span style={{ ...peerState, color: connColor }}>{p.connectionState}</span>
+            </div>
+            <div style={peerSub}>
+              ice {p.iceConnectionState} · track {p.hasRemoteStream ? '✓' : '—'} · sink{' '}
+              {slot ? (slot.sinkPaused ? 'paused' : 'playing') : '—'}
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 };
@@ -88,6 +139,30 @@ const track: React.CSSProperties = {
   overflow: 'hidden',
 };
 const fill: React.CSSProperties = { height: '100%', transition: 'width 80ms linear' };
+const peerRow: React.CSSProperties = {
+  marginTop: 4,
+  padding: '4px 6px',
+  background: 'rgba(255,255,255,0.04)',
+  borderRadius: 4,
+};
+const peerHead: React.CSSProperties = {
+  display: 'flex',
+  justifyContent: 'space-between',
+  alignItems: 'center',
+};
+const peerLabel: React.CSSProperties = {
+  fontVariantNumeric: 'tabular-nums',
+  opacity: 0.85,
+};
+const peerState: React.CSSProperties = {
+  fontWeight: 600,
+  fontSize: 10,
+};
+const peerSub: React.CSSProperties = {
+  marginTop: 2,
+  fontSize: 10,
+  opacity: 0.65,
+};
 const err: React.CSSProperties = {
   marginTop: 6,
   padding: '4px 6px',

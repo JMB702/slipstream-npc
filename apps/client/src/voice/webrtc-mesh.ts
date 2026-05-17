@@ -45,6 +45,27 @@ export const onPeerTrack = (l: PeerTrackListener): (() => void) => {
   return () => trackListeners.delete(l);
 };
 
+// Diagnostic snapshot for the in-game VoiceDebug widget. Returns a compact
+// view of every peer's RTC + ICE state plus whether a remote audio track
+// has actually arrived. Cheap — just reads RTCPeerConnection getters.
+export interface MeshPeerInfo {
+  peerId: string;
+  polite: boolean;
+  connectionState: RTCPeerConnectionState;
+  iceConnectionState: RTCIceConnectionState;
+  hasRemoteStream: boolean;
+}
+export const getMeshState = (): { started: boolean; peers: MeshPeerInfo[] } => ({
+  started,
+  peers: Array.from(peers.entries()).map(([peerId, p]) => ({
+    peerId,
+    polite: p.polite,
+    connectionState: p.pc.connectionState,
+    iceConnectionState: p.pc.iceConnectionState,
+    hasRemoteStream: p.remoteStream !== null,
+  })),
+});
+
 const emitTrack = (peerId: string, stream: MediaStream | null): void => {
   for (const l of trackListeners) l(peerId, stream);
 };

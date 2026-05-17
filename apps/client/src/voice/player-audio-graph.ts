@@ -142,6 +142,27 @@ export const setListenerPose = (pos: Vec3, forward: Vec3): void => {
   }
 };
 
+// Diagnostic snapshot for the in-game VoiceDebug widget. Returns the audio
+// context state ('running' is the only one that actually plays sound) plus
+// per-slot info on whether the hidden <audio> sink is paused (autoplay
+// still blocked) and the number of audio tracks in the MediaStream.
+export interface AudioGraphSlotInfo {
+  peerId: string;
+  sinkPaused: boolean;
+  trackCount: number;
+}
+export const getAudioGraphState = (): {
+  ctxState: AudioContextState | null;
+  slots: AudioGraphSlotInfo[];
+} => ({
+  ctxState: ctx?.state ?? null,
+  slots: Array.from(slots.entries()).map(([peerId, slot]) => ({
+    peerId,
+    sinkPaused: slot.sink.paused,
+    trackCount: (slot.sink.srcObject as MediaStream | null)?.getAudioTracks().length ?? 0,
+  })),
+});
+
 // Force-suspend the audio graph (used on mute-everyone toggles or page hide
 // to save CPU). Idempotent.
 export const suspendAudioGraph = (): void => {
