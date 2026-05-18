@@ -23,7 +23,16 @@ import * as SkeletonUtils from 'three/examples/jsm/utils/SkeletonUtils.js';
 import { COFFEE_WORLD_POSITION, PLAYER, POSE, type CharacterId, type PlayerId, type Pose, type PoseTransition, type Vec3 } from '@slipstream-npc/shared';
 import { useGame } from '../store.js';
 import { getCameraDist, startDrinkLock } from './local-state.js';
-import { playCoffeeSip, playGunshot, playHitMarker, playReload } from './sfx.js';
+import {
+  FOOTSTEP_INTERVAL_RUN_MS,
+  FOOTSTEP_INTERVAL_WALK_MS,
+  FOOTSTEP_MIN_SPEED,
+  playCoffeeSip,
+  playFootstep,
+  playGunshot,
+  playHitMarker,
+  playReload,
+} from './sfx.js';
 
 // =============================================================================
 // Mixamo rifle-aim character swap workflow
@@ -313,6 +322,8 @@ export const Character = ({
   // after a couple dozen seconds of play. Server-assigned `at` is monotonic.
   const lastAtRef = useRef<number>(-1);
   const muzzleFlashUntilRef = useRef(0);
+  const lastFootstepAtRef = useRef(0);
+  const footstepWorldPos = useMemo(() => new Vector3(), []);
   const camera = useThree((s) => s.camera);
 
   useEffect(() => {
@@ -492,6 +503,29 @@ export const Character = ({
 
   useFrame(() => {
     const wrapper = wrapperRef.current;
+
+    // Footstep cadence — runs independent of gun/bone availability (characters
+    // without a right-hand bone still walk). Re-triggers the same one-shot at
+    // a walk- or run-interval, so faster gait = shorter interval, pitch invariant.
+    // Reuses the airborne heuristic from the locomotion state machine so steps
+    // mute mid-jump on the same frame the Jump pose engages.
+    if (wrapper) {
+      const speed = Math.hypot(velocity[0], velocity[2]);
+      const airborne = Math.abs(velocity[1]) > AIRBORNE_VY;
+      if (alive && !vaulting && !airborne && speed >= FOOTSTEP_MIN_SPEED) {
+        const interval = speed >= WALK_RUN_THRESHOLD ? FOOTSTEP_INTERVAL_RUN_MS : FOOTSTEP_INTERVAL_WALK_MS;
+        const now = performance.now();
+        if (now - lastFootstepAtRef.current >= interval) {
+          wrapper.getWorldPosition(footstepWorldPos);
+          const dx = camera.position.x - footstepWorldPos.x;
+          const dy = camera.position.y - footstepWorldPos.y;
+          const dz = camera.position.z - footstepWorldPos.z;
+          playFootstep(Math.sqrt(dx * dx + dy * dy + dz * dz));
+          lastFootstepAtRef.current = now;
+        }
+      }
+    }
+
     const gun = gunMeshRef.current;
     const bone = handBoneRef.current;
     if (!wrapper || !gun || !bone) return;

@@ -76,7 +76,7 @@ apps/client/src/
   game/local-state.ts    — singletons for input + predicted state
   game/input.ts          — pointer-lock + WASD + mouse handlers
   game/Tracers.tsx       — bullet tracers from shot events
-  game/sfx.ts            — Web Audio one-shot SFX (gunshot, dry-fire, hit-marker, reload)
+  game/sfx.ts            — Web Audio one-shot SFX (gunshot, dry-fire, hit-marker, reload, footstep [muted])
   ui/Lobby.tsx           — Map dropdown (replaces the old Room input)
   ui/Minimap.tsx         — reads activeMapId + MapDef.obstacles
 public/models/Soldier.glb — Mixamo character + animations (Idle/Walk/Run/Fire/Reload/StrafeL/StrafeR)
@@ -264,6 +264,7 @@ To swap or add animations:
 - **Dry-click**: triggered in `LocalPlayer.tsx` when `consumeFire()` is true with `meNow.alive && meNow.ammo <= 0`. Server silently ignores no-ammo fires (`tryFire` early-returns), so this is a pure client-side feedback; the local player already knows ammo from the snapshot.
 - **Hit-marker**: same `Character.tsx` shot subscriber, gated on `playerId === myId && ev.hit !== null`. Non-spatial (it's UI feedback). The mp3 has ~217ms of leading silence before the impact transient — `findOnset()` scans for the first sample at ≥10% of peak amplitude (cached per URL) and `src.start(0, offset)` skips the lead-in so the impact lands with the gunshot.
 - **Reload**: triggered by a `useEffect` in `Character.tsx` watching the `reloading` prop for a `false → true` transition; looks up the player's position from the latest snapshot for distance attenuation. Tighter falloff than gunshot (`RELOAD_MAX_DIST = 25`) — only audible to nearby enemies as a tactical cue. Audio is 2.0s, server `WEAPON.reloadMs` is 1500ms; the tail plays past reload completion (intentional, no truncation).
+- **Footsteps (MUTED — needs revisit)**: a cadence ticker in `Character.tsx:useFrame` re-triggers `playFootstep` at `FOOTSTEP_INTERVAL_WALK_MS` (500ms) or `FOOTSTEP_INTERVAL_RUN_MS` (333ms) based on `speed >= WALK_RUN_THRESHOLD`, gated on `alive && !vaulting && !airborne && speed >= FOOTSTEP_MIN_SPEED`. Re-trigger pattern (not playbackRate) so faster gait keeps pitch invariant. **Currently silenced** by setting `FOOTSTEP_BASE_VOL = 0` in `sfx.ts` — the boots one-shot was too loud / monotonous in playtest. To revisit: pick a quieter mp3 or layer (`Audio/SFX/Large_Boots_footstep_#3-1779045176440.mp3` is the placeholder), reconsider whether NPCs should emit them too (current behavior: yes, all characters), and decide whether walking-while-firing (sprint demote) should keep walk cadence or go silent during combat focus. Flip `FOOTSTEP_BASE_VOL` to a non-zero value (e.g. 0.35) to re-enable without touching anything else.
 
 Volume constants live at the top of `sfx.ts`. Source SFX live in `Audio/SFX/` (not committed); the in-game files are 1:1 copies in `public/audio/`.
 
