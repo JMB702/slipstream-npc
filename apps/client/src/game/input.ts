@@ -1,3 +1,5 @@
+import { getGamepadBinding, getKeyboardBinding } from '../controls.js';
+
 export interface InputState {
   forward: number;
   right: number;
@@ -5,6 +7,10 @@ export interface InputState {
   sprint: boolean;
   fire: boolean;
   reload: boolean;
+  // Casual-mode smoke emote. Held while the smoke button (KeyB / D-pad
+  // down) is pressed. Server gates the actual `smoking` state on pose
+  // and stationary input — see applyInput.
+  smoke: boolean;
   // "Use the thing in front of me" — hold to engage. Tracks the wall-clock
   // start of the current hold (E key or gamepad Y); null when not pressed.
   // The full interact press is fired by consumeInteractHold() once the hold
@@ -14,6 +20,10 @@ export interface InputState {
   // Hold-to-aim flag (RMB on PC, LT/L2 on gamepad). Camera reads this to
   // pull in for ADS — purely a presentation flag, not gameplay-affecting.
   aiming: boolean;
+  // Mouse-/right-stick-driven camera direction. In combat mode this also IS
+  // the player's body yaw (server snaps body to camera every tick). In casual
+  // mode the body lerps separately toward velocity direction — `state.yaw`
+  // here stays the camera direction either way.
   yaw: number;
   pitch: number;
   pointerLocked: boolean;
@@ -38,6 +48,7 @@ export const createInput = (canvas: HTMLCanvasElement): {
     sprint: false,
     fire: false,
     reload: false,
+    smoke: false,
     interactHeldSince: null,
     aiming: false,
     yaw: 0,
@@ -59,6 +70,7 @@ export const createInput = (canvas: HTMLCanvasElement): {
   let kbJump = false;
   let kbSprint = false;
   let kbReload = false;
+  let kbSmoke = false;
   let mouseAim = false;
 
   let gpForward = 0;
@@ -66,6 +78,7 @@ export const createInput = (canvas: HTMLCanvasElement): {
   let gpJump = false;
   let gpSprint = false;
   let gpReload = false;
+  let gpSmoke = false;
   let gpAim = false;
 
   const mergeAxes = () => {
@@ -76,25 +89,42 @@ export const createInput = (canvas: HTMLCanvasElement): {
     state.jump = kbJump || gpJump;
     state.sprint = kbSprint || gpSprint;
     state.reload = kbReload || gpReload;
+    state.smoke = kbSmoke || gpSmoke;
     state.aiming = mouseAim || gpAim;
   };
 
   const keys = new Set<string>();
 
+  // Keys read from controls.ts on every poll so rebinding the menu takes
+  // effect immediately — no need to restart the input session.
+  const keyHeld = (code: string | null): boolean => code !== null && keys.has(code);
   const updateKbAxes = () => {
-    kbForward = (keys.has('KeyW') ? 1 : 0) - (keys.has('KeyS') ? 1 : 0);
-    kbRight = (keys.has('KeyD') ? 1 : 0) - (keys.has('KeyA') ? 1 : 0);
-    kbJump = keys.has('Space');
-    kbSprint = keys.has('ShiftLeft') || keys.has('ShiftRight');
-    kbReload = keys.has('KeyR');
+    const fwd = getKeyboardBinding('move_forward');
+    const back = getKeyboardBinding('move_backward');
+    const left = getKeyboardBinding('strafe_left');
+    const right = getKeyboardBinding('strafe_right');
+    kbForward = (keyHeld(fwd) ? 1 : 0) - (keyHeld(back) ? 1 : 0);
+    kbRight = (keyHeld(right) ? 1 : 0) - (keyHeld(left) ? 1 : 0);
+    kbJump = keyHeld(getKeyboardBinding('jump'));
+    // Sprint accepts both shift keys by default; also picks up whatever the
+    // user rebound it to. Hardcoded second-shift fallback so a user who only
+    // rebinds the left shift still gets the right one.
+    const sprintKey = getKeyboardBinding('sprint');
+    kbSprint = keyHeld(sprintKey) || (sprintKey === 'ShiftLeft' && keys.has('ShiftRight'));
+    kbReload = keyHeld(getKeyboardBinding('reload'));
+    // Held while pressed; server enforces casual-mode gate + stationary-stick
+    // start condition + cancel-on-move semantics.
+    kbSmoke = keyHeld(getKeyboardBinding('smoke'));
     mergeAxes();
     mergeButtons();
   };
 
   const onKeyDown = (e: KeyboardEvent) => {
-    // Start a fresh interact hold on KeyE press. Skip if E is already held
-    // (OS key-repeat would otherwise reset the timer).
-    if (e.code === 'KeyE' && !keys.has('KeyE')) {
+    // Start a fresh interact hold when the rebindable interact key is
+    // pressed. Skip if it's already held (OS key-repeat would otherwise
+    // reset the timer).
+    const interactKey = getKeyboardBinding('interact');
+    if (interactKey && e.code === interactKey && !keys.has(interactKey)) {
       state.interactHeldSince = performance.now();
       interactFiredThisHold = false;
     }
@@ -102,7 +132,8 @@ export const createInput = (canvas: HTMLCanvasElement): {
     updateKbAxes();
   };
   const onKeyUp = (e: KeyboardEvent) => {
-    if (e.code === 'KeyE') {
+    const interactKey = getKeyboardBinding('interact');
+    if (interactKey && e.code === interactKey) {
       state.interactHeldSince = null;
       interactFiredThisHold = false;
     }
@@ -197,12 +228,13 @@ export const createInput = (canvas: HTMLCanvasElement): {
 
     const pad = pickGamepad();
     if (!pad) {
-      if (gpForward !== 0 || gpRight !== 0 || gpJump || gpSprint || gpReload || gpAim) {
+      if (gpForward !== 0 || gpRight !== 0 || gpJump || gpSprint || gpReload || gpSmoke || gpAim) {
         gpForward = 0;
         gpRight = 0;
         gpJump = false;
         gpSprint = false;
         gpReload = false;
+        gpSmoke = false;
         gpAim = false;
         mergeAxes();
         mergeButtons();
@@ -237,10 +269,17 @@ export const createInput = (canvas: HTMLCanvasElement): {
       clampPitch();
     }
 
-    gpJump = isPressed(pad, 0);
-    gpReload = isPressed(pad, 2);
+    // Gamepad button bindings are pulled fresh from controls.ts each poll so
+    // rebinding takes effect immediately. Null bindings (action has no
+    // gamepad mapping) read as not-pressed.
+    const buttonPressed = (idx: number | null): boolean =>
+      idx !== null && isPressed(pad, idx);
+    gpJump = buttonPressed(getGamepadBinding('jump'));
+    gpReload = buttonPressed(getGamepadBinding('reload'));
+    gpSmoke = buttonPressed(getGamepadBinding('smoke'));
 
-    const sprintPressed = isPressed(pad, 10);
+    const sprintBtn = getGamepadBinding('sprint');
+    const sprintPressed = sprintBtn !== null && isPressed(pad, sprintBtn);
     if (sprintPressed && !prevSprintPressed) sprintToggled = !sprintToggled;
     prevSprintPressed = sprintPressed;
     gpSprint = sprintToggled;
@@ -256,11 +295,13 @@ export const createInput = (canvas: HTMLCanvasElement): {
     }
     prevTriggerPressed = triggerPressed;
 
-    // Button 3 = Y on Xbox, Triangle on PlayStation. Hold to engage —
-    // mirrors the keyboard KeyE flow so consumeInteractHold() can fire the
-    // interact once the hold duration crosses INTERACT_HOLD_MS regardless
-    // of input device. Rising edge starts the hold timer; release clears.
-    const interactPressed = isPressed(pad, 3);
+    // Rebindable interact button — defaults to Y / Triangle (idx 3). Hold
+    // to engage; mirrors the keyboard interact flow so consumeInteractHold()
+    // fires the interact once the hold duration crosses INTERACT_HOLD_MS
+    // regardless of input device. Rising edge starts the hold timer; release
+    // clears.
+    const interactBtn = getGamepadBinding('interact');
+    const interactPressed = interactBtn !== null && isPressed(pad, interactBtn);
     if (interactPressed && !prevInteractPressed) {
       state.interactHeldSince = performance.now();
       interactFiredThisHold = false;

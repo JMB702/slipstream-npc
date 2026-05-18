@@ -436,4 +436,15 @@ export const POSE = {
   // Combat overrides: any incoming attack clears pose so the NPC can react.
   // Number of dance variants supported (DanceHipHop, DanceSalsa, DanceSilly).
   danceVariants: 3,
+  // Auto-expire timer for Rob's fight_idle stance. Unlike sit/lay/lean/dance
+  // (which hold until something explicitly clears them), fight_idle is a
+  // brief defensive stance — server returns the NPC to casual_idle after this
+  // so the patrol bot doesn't lock in place forever.
+  fightIdleMs: 6000,
+  // Random fight_idle trigger for Rob's NPC. Cooldown: don't re-trigger
+  // within this window after the last fight_idle. Probability: per-tick die
+  // roll once the cooldown has elapsed. At 30 Hz, prob=0.001 → ~3%/sec →
+  // expected wait ≈ 30s after the cooldown clears → average cycle ~50s.
+  fightIdleCooldownMs: 20_000,
+  fightIdleRollProb: 0.001,
 } as const;

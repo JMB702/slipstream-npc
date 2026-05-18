@@ -149,17 +149,30 @@ pnpm deploy:party      # PartyKit deploy (requires Adobe-free PartyKit login)
 # Map asset pipeline
 pnpm extract:collision # voxelize Maps/<src>/scene.gltf → fps_shooter.collision.ts
 pnpm extract:nav       # Blender-authored Walk area → fps_shooter.nav.ts (waypoint graph)
+pnpm bake:bible        # parse docs/{backstory,map-*}.html → packages/shared/src/world-bible.ts
+                       # run after editing any of the three HTML world-bible docs
 
 # NPC + feedback workflow (see "Feedback pipeline" + "Workflow tooling" below)
 pnpm feedback:report   # join events.jsonl + DO transcripts → markdown report (LLM extract optional)
 pnpm session:last [N]  # last N voice sessions across all rooms, markdown — primary debug tool
+                       # PARTY_HOST=https://… pnpm session:last  → query prod admin endpoint
 pnpm npc:state <npcId> "<summary>" [--evidence=…] [--source=…]   # add a persona delta
 pnpm npc:state --list <npcId>      # inspect persona deltas
 pnpm npc:state --clear <npcId>     # wipe persona deltas
-pnpm sync:kb           # upload docs/world-bible.md → ElevenLabs knowledge base, attach to all agents
+pnpm sync:kb           # upload docs/*.html → ElevenLabs KB (legacy ConvAI path only;
+                       # the decoupled stack reads world-bible.ts which `bake:bible` emits)
 ```
 
-`vercel.json` at the repo root pins client builds for Vercel. `VITE_PARTYKIT_HOST` is set as a Vercel project env var (production scope) pointing at the deployed PartyKit host (e.g. `slipstream-rift.<your-username>.partykit.dev`). `apps/party/.env` (gitignored; see `apps/party/.env.example` for the schema) holds `ACCESS_CODE=<4 digits>` and the ElevenLabs secrets for local dev — the `partykit dev` server reads it on startup.
+`vercel.json` at the repo root pins client builds for Vercel. `VITE_PARTYKIT_HOST` is set as a Vercel project env var (production scope) pointing at the deployed PartyKit host (e.g. `slipstream-rift.<your-username>.partykit.dev`). `apps/party/.env` (gitignored; see `apps/party/.env.example` for the schema) holds the runtime secrets the `partykit dev` server reads on startup.
+
+**Required env vars** (both for `partykit dev` via `.env` and for prod via `npx partykit env add KEY value` — use `printf '%s'` not `echo` per Gotcha #18):
+
+- `ACCESS_CODE` — 4-digit room gate.
+- `ELEVENLABS_AGENT_TOOL_SECRET` — random hex; gates `/admin/*` and `/tools/*` routes.
+- `ELEVENLABS_API_KEY` — used at runtime by the decoupled stack's TTS WS + by `pnpm sync:kb` and the agent-update scripts.
+- `DEEPGRAM_API_KEY` — streaming STT (decoupled stack). Without it, scene transcripts never reach the orchestrator.
+- `ANTHROPIC_API_KEY` — LLM turns. Anthropic uses prepaid credits; auto-reload recommended (Gotcha #19).
+- `ELEVENLABS_AGENT_ID_*` (one per NPC) — only consulted by the legacy ConvAI path; the decoupled stack uses `npc.agentId` from the roster.
 
 ### Deployment (manual; not auto-on-merge)
 
@@ -226,6 +239,20 @@ These are the things that have eaten hours. Read before changing related code.
 
 16. **Sister `.claude/worktrees/` are a reversion vector.** Concurrent agent sessions in sister worktrees can check files out into the main directory and clobber uncommitted work. If the same edits keep being undone, check `git worktree list` and remove stale worktrees: `git worktree remove --force .claude/worktrees/<name>` + `git branch -D claude/<name>`. Commit aggressively to lock work in.
 
+17. **`setTimeout` inside a Cloudflare DO request handler doesn't reliably fire in prod, even with active WebSockets.** Local `partykit dev` keeps everything alive in a single workerd so deferred work runs; prod can put the DO to sleep between events and the timer never fires. The orchestrator's transcript-coalesce hold and playback-finalize originally used `setTimeout` and silently failed every single NPC turn on the live deploy. Fix: anchor deferred work to wall-clock deadlines polled by the existing `setInterval`-driven `runTick`, which survives DO request boundaries because `onStart` set it up. See `voice/orchestrator.ts:tick`.
+
+18. **`echo "$VAL" | npx partykit env add KEY` appends a trailing newline to the deployed value.** The constant-time compares on `ELEVENLABS_AGENT_TOOL_SECRET` then fail with `\n` mismatch (401 from `/admin/*`), and `xi_api_key`-style header reads of `ELEVENLABS_API_KEY` 401 against the upstream service. Use `printf '%s' "$VAL" | npx partykit env add KEY` for every value push. `partykit env list` shows the key as present either way; you only notice when something downstream rejects.
+
+19. **Anthropic uses prepaid credits, not just a card on file.** Even with billing set up, runs out → every NPC turn aborts with `npc_turn_error message="credit balance is too low"`. Enable auto-reload at console.anthropic.com/settings/billing to avoid silent prod outages.
+
+20. **Deepgram `/v1/auth/grant` 403s on most project keys.** The endpoint needs a scope ordinary project keys don't have. `handleSttTokenRequest` falls back to handing the project key directly to the browser — acceptable for local dev / private playtests but NOT for any public deploy. Replace with either a properly-scoped key or a server-side audio proxy before opening the game to the public.
+
+21. **Module-level state on the Server class bleeds across rooms in `partykit dev`.** Prod uses isolated DOs per room so it doesn't matter; dev runs every room in one workerd process and `const sceneTranscript: SceneLine[] = []` at module scope ends up shared. Caused phantom duplicate scene transcripts in `pnpm session:last` output. Keep per-room state as instance fields on the Server class (`this.sceneTranscript`, `this.recentEvents`).
+
+22. **Anthropic `-latest` aliases are retired on Haiku.** The `claude-3-5-haiku-latest` id 404s; use a dated snapshot (`claude-haiku-4-5-20251001` as of this writing). Sanity check available models with `curl https://api.anthropic.com/v1/models -H "x-api-key: $KEY" -H "anthropic-version: 2023-06-01"`. Bump `LLM_MODEL` in `apps/party/src/voice/orchestrator.ts` when a newer Haiku ships.
+
+23. **ElevenLabs streaming-input WS rejects `xi-api-key` as a subprotocol.** Their docs once suggested it; the live endpoint authenticates only via the `xi_api_key` field in the BOS message body. If TTS turns end cleanly with zero audio chunks emitted, that's this — subprotocol auth opens the socket, the EOS triggers, no audio ever streams.
+
 ## Conventions
 
 - **Wire types only** in `@slipstream/shared`. Server `ServerPlayer` extends `PlayerState` privately; the public wire shape is `PlayerState`.
@@ -274,7 +301,16 @@ Volume constants live at the top of `sfx.ts`. Source SFX live in `Audio/SFX/` (n
 
 ## State of the art (open polish items)
 
-**Fork-specific in-flight work lives in [`docs/workbook.html`](docs/workbook.html).** Open the file in a browser for status pills + action items. Cards include B1 (voice session drops while stationary — instrumented, awaiting reproduction with ring buffer hot), B5/B9 (arena nav + sky-walking), F1 (Halsey — meta-fiction NPC creation, will use persona deltas), F2/F3 (sense-of-time follow-on, jump action). Pulling from there before doing other engine polish keeps the persona work cohesive.
+**Voice redesign — shipped.** Phases 1-4 of the multi-speaker plan are live in prod. Every NPC runs on the decoupled stack (Deepgram → Anthropic → ElevenLabs TTS streaming + WebRTC peer mesh for player voice). Several workbook items are now N/A under the new architecture (B1 ConvAI session drops, B2 greeting recency, B10 self-state alerts) — they predate the rewrite and are kept for historical context.
+
+**Fork-specific in-flight work still lives in [`docs/workbook.html`](docs/workbook.html).** Surviving cards include B5/B9 (arena nav + sky-walking), F1 (Halsey — meta-fiction NPC creation, will use persona deltas), F2/F3 (sense-of-time follow-on, jump action).
+
+Voice-specific follow-ups from the redesign:
+
+- **Remove the `[tick-alive]` diagnostic** in `apps/party/src/server.ts:runTick`. Useful to verify prod ticks were running; now spamming logs every 5s. Cosmetic only.
+- **Deepgram `/v1/auth/grant` 403 + project-key fallback.** Working around Gotcha #20 with a key that reaches the browser. Before any public deploy, get a properly-scoped Deepgram key OR route audio through a server proxy.
+- **Vercel `vercel --prod` is a manual step** that has to happen separately from `npx partykit deploy`. No auto-deploy intentionally (see "Deployment" section).
+- **Client SpeakerHUD "click to look" toward the speaker** — wired interest but not implemented; the panel only shows direction.
 
 Queued fork-specific features (not yet in the workbook):
 
@@ -315,43 +351,52 @@ Everything above this section is inherited from upstream Slipstream and applies 
 - **Friendship is a real graph.** Both NPCs and humans can have `friendsWith: string[]`. NPCs start with seed friendships from the roster. Players earn NPC friendship via conversation: the ElevenLabs agent has a `make_friend(player_name)` tool that webhooks back into PartyKit (`POST /tools/make_friend`).
 - **Friendship is authoritative on the server.** Stored in PartyKit Durable Object storage keyed by `friend:<npcId>:<playerName>`. Survives room restarts.
 
-## Voice topology (V1)
+## Voice topology (multi-speaker, decoupled stack — current)
 
-- **Per-player 1:1 ConvAI sessions.** Each player runs its own ElevenLabs Conversational AI session with whichever NPC is in proximity. Browser ↔ ElevenLabs direct WebRTC; PartyKit is not in the audio path.
-- **NPC memory is the bridge between sessions.** On `voice_session_start`, the server returns an `npc_context` message with a 2KB memory blob: friendship score + last 10 lines with this player + last 5 lines with anyone recently in earshot of this NPC. The agent receives the blob as a session prompt override, so the same NPC "remembers" what other players said.
-- **Other players in earshot hear the agent's TTS** via a PartyKit-broadcast `npc_audio` event, played positionally on listener clients (PannerNode HRTF). Speaker mic stays direct to ElevenLabs.
-- **Always-on, proximity-gated mic** within `NPC_VOICE_RADIUS = 5m` with 0.5m hysteresis. At most one session at a time per local player; closest wins on overlap.
-- **Mute** is keyboard `M` plus Xbox controller button (Y or LSB). Muted = `track.enabled = false`; session stays open so NPC voice is still heard.
+Every NPC currently in the roster has `useDecoupledStack: true`. ElevenLabs ConvAI sessions are no longer opened; the legacy code path stays for backward compatibility but is unreachable in normal play. The voice stack is now three separately-orchestrated services with the server in the middle.
 
-### Known limitation
-V1 is per-listener sessions, not true N→1→N multi-speaker. Agent has cross-player context via memory blob but each response is driven by one speaker. True multi-speaker bridge (server-side STT per stream, single LLM conversation, broadcast TTS) is deferred to V2.
+- **STT — Deepgram streaming.** Each player's browser opens a WebSocket to `wss://api.deepgram.com/v1/listen` with a token minted by the server (`POST /tools/deepgram-token` flow). 48 kHz linear16 PCM streams up; final transcripts come back and are forwarded to PartyKit as `transcript { final: true, speakerName }` ClientMessages.
+- **LLM — Anthropic Claude Haiku 4.5 streaming.** Per-turn system prompt built from persona + persona deltas + canonical world bible + scene state + recent-self-turns. Tool-use bound to the 10 in-game tool handlers (follow_player / patrol / lean_wall / drink_coffee / etc.) — Claude emits `tool_use` blocks mid-stream and the orchestrator's `dispatchTool` routes them into the same internal methods the HTTP webhooks use.
+- **TTS — ElevenLabs `eleven_flash_v2_5` over WebSocket.** Auth via `xi_api_key` in the BOS message (NOT subprotocol — that path doesn't authenticate on this endpoint). MP3 chunks stream back as the LLM tokens flow in; per-NPC `npc_audio_chunk` ServerMessages broadcast to every client.
+- **Player voice — WebRTC peer mesh, no SFU.** PartyKit relays SDP+ICE; audio flows peer-to-peer. `@ricky0123/vad-web` handles client-side VAD for auto-mute (mic level falls to silent when not speaking). `M` key still hard-mutes.
+- **Arbitration — server picks the responding NPC.** Score = name match (100) + topic keyword (20 each, cap 60) + last-speaker bonus (8) + proximity (≤20). Deepgram-friendly `nameAliases` on each NPC catch mishears (Mara/Myra → Mira). Below `ARB_MIN_SCORE = 6`, no NPC speaks. Driven by transcript arrival (Deepgram finals are the "human finished speaking" signal — VAD transitions are unreliable on prod).
+- **Turn state machine.** `IDLE → HUMAN_SPEAKING → ARBITRATING → NPC_SPEAKING → IDLE`. Loop guard caps consecutive NPC turns at 3 without a human utterance. Per-turn playback-duration hold (~65ms/character) prevents the next arbitration from firing while a previous NPC's audio is still in the client buffer.
+- **Barge-in — transcript-arrival cancellation.** A new scene transcript arriving while an NPC is mid-speech cancels the in-flight LLM/TTS streams and broadcasts `npc_audio_stop` so clients clear the audio queue. Browser VAD speaking transitions also fire this path when they work.
+- **Spatial audio.** NPC audio chunks routed through per-NPC `PannerNode` (HRTF) at the bot's snapshot position. The HUD speaker panel shows offscreen direction arrows + distance so a player can find an NPC they can hear but can't see.
+
+### What's actually broadcast over PartyKit
+- `transcript` (client → server): scene STT finals, also legacy ConvAI lines when an NPC ever flips back.
+- `voice_state` (client → server): VAD + manual mute state, debounced.
+- `webrtc_signal` (both directions): SDP/ICE relay for the peer mesh.
+- `stt_token_request` / `stt_token` (round-trip): Deepgram access tokens with a 25s server-side mint cooldown.
+- `npc_audio_chunk` / `npc_audio_stop` (server → client): base64 MP3 frames + cancel.
+
+### Wire types still present from the legacy path
+- `voice_session_start` / `voice_session_end` / `consent` / `consent_required` / `npc_context` / `npc_alert` — kept so an NPC with `useDecoupledStack: false` would still negotiate a ConvAI session. None of the live roster uses this today.
 
 ## Identity & consent
 
 - **Player identity is `hello.name`** for v1. Two players named "Bob" share friendship and transcript state. Real fix is a per-player UUID flow — track as future work.
 - **Voice recording requires consent.** `ConsentGate.tsx` renders before `Lobby.tsx`; checkbox covers voice recording, transcription, storage, and third-party (ElevenLabs) transmission. Florida is a two-party-consent state — do not bypass this gate. Consent is stored both in `localStorage` (`slipstream_consent_v1`) and server-side (Durable Object `consent:<playerName>`).
 
-## Wire types (additions to `packages/shared/src/messages.ts`)
-
-`ClientMessage`:
-- `consent { agreed, version }`
-- `voice_session_start { npcId, sessionId }`
-- `voice_session_end { sessionId, reason? }` — `reason` is diagnostic (`proximity | npc_disappeared | sdk_ended | sdk_error | teardown | manual`); server emits it into the feedback pipeline so B1-style "session dropped without a user action" cases are visible
-- `transcript { npcId, sessionId, role: 'user' | 'agent', text, at }`
-
-`ServerMessage`:
-- `consent_required { version }`
-- `npc_context { npcId, sessionId, agentId? | signedUrl?, memoryBlob, friendship, elapsedSinceLastMs? }` — elapsed-since-last drives the B2 greeting-recency bucket on the client
-- `npc_alert { npcId, sessionId, text }` — system message pushed into the live ConvAI session via `sendContextualUpdate`. Used to feed the agent in-game events (`damaged`, `shot_fired`, `friend_attacked`, etc.) AND self-state confirmations (`self_follow_started`, `self_attack_stopped`, etc.) so the LLM's perception stays aligned with server state. See "Self-state alerts" below.
-
 ## Where things live (new files in this fork)
 
 ```
 packages/shared/src/
-  npc-roster.ts                       — NpcDef + NPCS (7 personas with baked agentIds)
-  npc-voice.ts (if present) / VOICE_BY_CHARACTER in npc-roster.ts — source of truth for
-                                        per-character voice ids (not a runtime input;
-                                        each agent has its tts.voice_id baked in)
+  npc-roster.ts                       — NpcDef + NPCS (6 personas). Each has agentId
+                                        (kept for ConvAI fallback), useDecoupledStack:
+                                        true, topicKeywords (arbitration scoring),
+                                        nameAliases (Deepgram mishear catches).
+  world-bible.ts                      — GENERATED by `pnpm bake:bible` from the three
+                                        docs/*.html canonical files. Exports
+                                        WORLD_BIBLE_SHARED + MAP_BIBLE[mapId].
+                                        DO NOT hand-edit; edit the HTMLs and rebake.
+  game-changes.ts                     — GAME_CHANGES registry, seeded once-per-room
+                                        into NPC state. New: multi-speaker conversation
+                                        announcement so NPCs reference the model in voice.
+  VOICE_BY_CHARACTER in npc-roster.ts — source of truth for per-character voice ids.
+                                        The decoupled stack falls back to this map when
+                                        NpcDef.voiceId is unset (it always is today).
 apps/party/src/
   social.ts                           — markAttack, isHostileTo, pruneHostility,
                                         adoptHostility, clearHostility
@@ -369,67 +414,112 @@ apps/party/src/
                                         so the controller can drop+repick instead
                                         of steering into walls)
     waypoints.ts                      — getNavGraph: per-map cache from MapDef
+  voice/                              — Phase 3-4 decoupled stack. Everything here is
+                                        new since the redesign.
+    orchestrator.ts                   — Per-room owner of the turn-state, LLM/TTS
+                                        streams, audio broadcast, barge-in cancel,
+                                        chain-trigger detection. Exposes tick() which
+                                        the server's runTick polls every TICK_MS.
+    turn-state.ts                     — IDLE / HUMAN_SPEAKING / ARBITRATING /
+                                        NPC_SPEAKING state machine + loop guard.
+    arbitration.ts                    — Name + topic + last-speaker + proximity scoring.
+                                        Uses nameAliases from the roster.
+    scene-prompt.ts                   — Builds the per-turn system + user prompt with
+                                        world bible, persona deltas, friendship,
+                                        recent-self-turns, anti-confabulation block.
+    llm.ts                            — Anthropic Messages API streaming wrapper.
+                                        Yields a {text, tool_use} event union.
+    tools.ts                          — Anthropic tool-use schemas for the 10 NPC
+                                        actions. Server.dispatchTool routes each
+                                        tool_use into the matching handler.
+    tts-stream.ts                     — ElevenLabs WS streaming TTS. xi_api_key goes
+                                        in the BOS message body — subprotocol auth
+                                        does NOT work on this endpoint.
 apps/client/src/voice/
   mic.ts                              — getUserMedia + permission flow
-  ConvAISession.ts                    — @elevenlabs/client wrapper. firstMessage
-                                        picked by recency bucket (B2 sense-of-time);
-                                        memoryBlob pushed via sendContextualUpdate
-                                        AFTER connect so it layers on the baked
-                                        persona instead of replacing it.
-  manager.ts                          — proximity-gated session start/end with
-                                        reason-tagged voice_session_end emits (B1)
+  vad.ts                              — @ricky0123/vad-web wrapper, speaking/silent
+                                        transitions, manual-mute integration.
+  webrtc-mesh.ts                      — Player-to-player voice mesh (perfect
+                                        negotiation, STUN-only, polite-by-id).
+  player-stt.ts                       — Deepgram WS client (linear16 PCM via
+                                        ScriptProcessorNode, auto-reconnect).
+  npc-audio-playback.ts               — Per-NPC PannerNode chain, gapless MP3
+                                        chunk scheduling, barge-in stop.
+  voice-runtime.ts                    — Top-level lifecycle: starts VAD + mesh + STT +
+                                        NPC audio after the welcome message lands.
+  ConvAISession.ts                    — LEGACY. @elevenlabs/client wrapper. Unused
+                                        while every NPC has useDecoupledStack: true.
+  manager.ts                          — LEGACY proximity-gated ConvAI session start/end.
+                                        Bails early on useDecoupledStack: true NPCs.
   mute.ts                             — global mute singleton (keyboard + gamepad)
 apps/client/src/ui/
-  ConsentGate.tsx                     — pre-lobby consent
+  ConsentGate.tsx                     — pre-lobby consent (v3 covers WebRTC + Deepgram)
+  SpeakerHUD.tsx                      — top-right "who's talking" panel with offscreen
+                                        direction arrows. Shows both human (🎙) and
+                                        NPC (🤖) rows.
   MuteIndicator.tsx                   — HUD widget
+  VoiceDebug.tsx                      — in-game diagnostics: ConvAI session (legacy),
+                                        VAD level, mesh peer state, audio-graph state.
+scripts/
+  bake-world-bible.mjs                — Parses docs/{backstory,map-fps-shooter,map-arena}.html
+                                        with the same htmlToText logic upload-knowledge-base.mjs
+                                        uses; emits packages/shared/src/world-bible.ts.
+                                        Run via `pnpm bake:bible` after editing any of
+                                        the three HTMLs.
+docs/
+  backstory.html                      — Shared world bible (the rules, the roster,
+                                        what players can/can't do). Editable in-browser
+                                        via contenteditable.
+  map-fps-shooter.html                — fps_shooter geometry / landmark names.
+  map-arena.html                      — arena geometry / landmark names.
 ```
 
-## ElevenLabs agent system (current — supersedes the older "dashboard setup" notes)
+## Per-turn system prompt (decoupled stack)
 
-The voice stack is now substantially automated. Skim once; everything below is reproducible without dashboard clicks.
+Built by `apps/party/src/voice/scene-prompt.ts:buildSceneSystem` on every NPC turn. The orchestrator collects the inputs (some async storage lookups in parallel for latency) and passes them to the pure prompt builder. Sections in order:
 
-### One agent per NPC, created via REST API
+1. **`## Who you are`** — the NPC's `personality` field from `npc-roster.ts` (multi-paragraph persona).
+2. **`## What's changed about you (authoritative — overrides your persona)`** — persona deltas from `state:<npcId>` storage. Front-loaded so the LLM weighs them above the static persona.
+3. **`## The world you live in (shared backstory)`** — `WORLD_BIBLE_SHARED`, baked from `docs/backstory.html`.
+4. **`## The room you are in right now (canonical — do not contradict)`** — the active map's entry from `MAP_BIBLE`, baked from `docs/map-*.html`.
+5. **`## What you can and cannot describe`** — the anti-confabulation block. Explicit lists of what the LLM MUST NOT invent (plants, insects, smells, weather, fixtures, new rooms) versus what it CAN draw from (its own past, other NPCs, real landmarks in the canonical room description, what other players just said). Added after Vicky was caught inventing "tiny purple flowers" the player could clearly see weren't there.
+6. **`## Right now`** — live state: health, ammo, follow target, flee target, hostility toward speakers in this scene.
+7. **`Other NPCs in the room: …`** — names so the LLM can address them by name.
+8. **`## Friendships in this scene`** — per-speaker friendship score, threshold marker.
+9. **`## What you said recently — HARD BAN on repeating these`** — last ~5 self turns in quotes. Strong instruction against verbatim/near-verbatim/lightly-reworded repeats.
+10. **`## How to respond`** — TTS-friendly output rules (no stage directions, no asterisk-emotes, no brackets, no speaker tags, plain dialogue only, 1-2 sentences usually).
 
-Every NPC in `npc-roster.ts` has a real `agentId` (no more `TODO_AGENT_ID_*` placeholders). Each agent has:
+User message: the scene transcript since the last NPC turn, one line per speaker prefixed with the speaker name.
 
-- **Baked system prompt** = the NPC's `personality` field (multi-paragraph backstory + speech tics + topic rotation + things-to-avoid).
-- **Baked voice** (`tts.voice_id`) per `VOICE_BY_CHARACTER` mapping — no per-session voice override; the agent ID alone selects the right voice.
-- **Six webhook tools** attached (see "Tool webhooks" below).
-- **Shared knowledge base** attached (the world bible — see below).
-- **Overrides** still enabled for `voice_id` / `first_message` / `prompt` on the platform side, so legacy override paths don't 422 — but the client only uses `firstMessage` (greeting selection) and pushes memoryBlob via `sendContextualUpdate` instead of overriding `prompt`.
+Tools: every prompt carries the 10 NPC_TOOLS schemas (follow_player / stop_following / patrol / sprint_patrol / lean_wall / flee_from / start_attacking / stop_attacking / make_friend / drink_coffee). Claude emits `tool_use` blocks inline; `Server.dispatchTool` routes them into the same internal methods the HTTP webhooks use, so a player saying "Vicky, follow me" produces identical behavior whether Claude calls the tool or the regex fallback in `applyTranscriptIntent` does.
 
-`resolveAgentId(npc)` in `server.ts` returns `npc.agentId` directly. The old `ELEVENLABS_AGENT_ID` env-var fallback is dead.
+## World bible pipeline (canonical, generated)
 
-### Tool webhooks (six total)
+Three artist-editable HTMLs in `docs/` are the source of truth:
 
-All routed by `apps/party/src/server.ts:onRequest` under `/parties/main/<roomId>/tools/<name>`, secret-gated by `ELEVENLABS_AGENT_TOOL_SECRET`. Each tool's dashboard JSON is in [`docs/agent-tools.md`](docs/agent-tools.md).
+- `docs/backstory.html` — shared facts every NPC knows (the rules, the roster, what players do, the wider arena complex).
+- `docs/map-fps-shooter.html` — geometry + landmark names for fps_shooter.
+- `docs/map-arena.html` — geometry + landmark names for arena.
 
-| Tool | Effect on the game |
-|---|---|
-| `make_friend` | Friendship score += `SOCIAL.friendBoost`. Past threshold the player and NPC are mutually `friendsWith` and the bot defends them on damage cascade. |
-| `follow_player` | Sets `bot.botFollowing = humanId`. Bot path-finds with the follow state machine. |
-| `stop_following` | Clears `bot.botFollowing`. |
-| `flee_from` | Sets `bot.botFleeingFrom = { id, until: now + SOCIAL.hostilityMs }`. Bot paths away. |
-| `start_attacking` | Conversationally-induced hostility (`adoptHostility`). 30s window, no friend cascade. |
-| `stop_attacking` | Clears hostility toward a target (`clearHostility`). Also drops `botTargetId` if it matches. |
+`pnpm bake:bible` parses all three with the same `htmlToText` logic `scripts/upload-knowledge-base.mjs` uses, strips editor scaffolding ("hit Save... run pnpm sync:kb"), and writes `packages/shared/src/world-bible.ts` (generated; DO NOT hand-edit). The orchestrator imports `WORLD_BIBLE_SHARED` + `knowledgeForMap(mapId)` and injects them into the prompt.
 
-Tool params arrive as either query string OR JSON body. Both forms supported because the dashboard form-config defaults to query and the JSON-mode dashboard defaults to body.
+`pnpm sync:kb` still exists and is unchanged — it uploads the same three HTMLs to ElevenLabs KB so any future ConvAI-flagged NPC sees identical lore. Keeping both paths in sync is the point of using the same parser.
 
-### Knowledge base (shared world bible)
+**When you edit a map or backstory:** save the HTML → `pnpm bake:bible` → PartyKit dev hot-reloads. If you want the ConvAI fallback updated too, also run `pnpm sync:kb`.
 
-Every agent has a shared knowledge base document attached: [`docs/world-bible.md`](docs/world-bible.md). Describes the arena, what NPCs can/can't do, who the other NPCs are, the outside world, and the deliberately-ambiguous "who runs this." Re-upload with `pnpm sync:kb` after editing — the script POSTs to `/v1/convai/knowledge-base/text` and re-PATCHes every agent's `knowledge_base` array.
+## Legacy ElevenLabs agents (currently dormant)
 
-### memoryBlob (dynamic per-session)
+Every NPC in `npc-roster.ts` still has a baked `agentId` from when the ConvAI path was active. The agents themselves exist in ElevenLabs with their personas, baked voices, six webhook tools, and the world bible attached as a KB document. They're never opened today because every roster entry has `useDecoupledStack: true` and both `apps/client/src/voice/manager.ts:startSession` and `apps/party/src/server.ts:handleVoiceSessionStart` bail early on that flag.
 
-Built in `server.ts:buildMemoryBlob` at session start, pushed to the agent via `sendContextualUpdate` after connect. Sections (in order):
+The ConvAI scaffolding stays present because:
 
-1. **`## What's changed about you (authoritative — overrides your persona)`** — persona deltas. If non-empty, instructs the LLM to treat these as TRUE NOW and the baked persona as the prior baseline. See "Persona deltas (F5)" below.
-2. **`## The game you live in`** — boilerplate world description.
-3. **`## Time since you last talked`** — present only when this player has spoken with this NPC before (per `getLastSessionEnd`). Tells the LLM how to phrase the gap.
-4. **`## Right now`** — live state: health, ammo, follow target, flee target, hostility toward this player.
-5. **Friendship score** + **recent transcript** + **cross-pollination** lines (other players this NPC spoke with in the last 5 min).
+- Flipping a single NPC back to the legacy path is one boolean — useful if the decoupled stack breaks in a way the legacy stack doesn't.
+- `pnpm sync:kb` keeps the agents' KB current so a flipped-back NPC isn't running on stale lore.
+- `pnpm npc:state` continues to work for both code paths (the storage is the same).
 
-Persona (the agent's static system prompt) is NOT in the blob — it lives on the agent and the blob layers above it.
+If you genuinely want to retire ConvAI, delete `apps/client/src/voice/ConvAISession.ts`, `apps/client/src/voice/manager.ts`, the legacy code branches in `handleVoiceSessionStart`, and `scripts/upload-knowledge-base.mjs`. Out of scope for this redesign; left as a future cleanup.
+
+The 10 in-game tools (`follow_player` / `stop_following` / `patrol` / `sprint_patrol` / `lean_wall` / `flee_from` / `start_attacking` / `stop_attacking` / `make_friend` / `drink_coffee`) are still routed by `apps/party/src/server.ts:onRequest` under `/parties/main/<roomId>/tools/<name>`, secret-gated by `ELEVENLABS_AGENT_TOOL_SECRET`. Both ConvAI webhooks and Claude tool-use enter through `Server.dispatchTool`. The schemas live in `apps/party/src/voice/tools.ts` (Claude) and `docs/agent-tools.md` (legacy dashboard JSON). Keep them in sync if you add a tool.
 
 ## Persona deltas (F5) — durable NPC self-knowledge
 
@@ -503,16 +593,21 @@ Fix: `server.ts:pushSelfStateAlert(bot, alert)` formats an `npc_alert` ServerMes
 
 The server emits structured `[EVENT] {json}` lines on stdout for every interesting thing. In dev: `pnpm dev 2>&1 | tee logs/events-$(date +%Y-%m-%d).jsonl`. The lines are greppable past PartyKit's ANSI noise.
 
-Event kinds (defined in `server.ts`):
-- `tool_call` — every webhook tool, ok=true/false
-- `voice_session` — start / end (with `reason` for B1 diagnostics, `durationMs` for telemetry)
+Event kinds (defined in `server.ts:FeedbackEvent`):
+- `tool_call` — every webhook tool + Claude tool-use, ok=true/false, source: 'tool'|'transcript' on the latter
+- `voice_session` — legacy ConvAI session start/end (unused while every NPC is on the decoupled stack)
 - `hostility_change` — set / clear / expire / cascade
 - `shot_fired` — every bot fire (hit + killed flags + shooter NPC id)
 - `friendship_change` — delta, new score, becameFriend boolean
 - `nav_blocked` — controller fires when `planPath` returns null
 - `feedback_signal` — regex-extracted from user transcripts (`bug`, `stuck`, `should`, etc. — see `FEEDBACK_TRIGGERS`)
+- `scene_transcript` — every finalized Deepgram utterance, the canonical "who said what when" line for multi-speaker rooms
+- `vad_transition` — diagnostic; player VAD speaking on/off (browser VAD often misses transitions but transcripts arrive anyway)
+- `arbitration_pick` / `arbitration_empty` / `arbitration_no_winner` — turn-state machine arbitration outcomes per utterance
+- `npc_turn_start` / `npc_first_audio` / `npc_turn_end` — decoupled NPC turn lifecycle; `firstChunkMs` is the silence-to-first-audio latency probe
+- `npc_turn_cancelled` / `npc_turn_aborted` / `npc_turn_error` — barge-in, missing-key, upstream-failure paths
 
-Also kept as a **1000-event in-memory ring buffer** on the server (per-DO isolate) so the admin HTTP routes can join events with transcripts without needing the tee'd file.
+Kept as a **1000-event in-memory ring buffer** on each Server instance (per-room — see Gotcha #21 for why this isn't module-level) so the admin HTTP routes can join events with transcripts without needing the tee'd file.
 
 `pnpm feedback:report [--player=X] [--since=24h] [--no-llm]` — reads logs/events-*.jsonl + decodes DO transcripts directly (via `v8.deserialize`) + retroactively regex-scans transcripts for feedback signals + (if `ANTHROPIC_API_KEY` is set) calls Haiku for structured `{category, summary, evidence, urgency, area}` extraction from the player's utterances. Produces markdown.
 
@@ -522,7 +617,9 @@ Don't decode DO SQLite by hand. The path going forward is:
 
 1. Player plays the game.
 2. Player tells the agent something interesting happened.
-3. `pnpm session:last [N]` — calls `/admin/sessions` on both `fps_shooter` and `arena` rooms, merges, sorts by recency, pretty-prints markdown with: room, time range, NPCs, transcript, events fired during the window, persona deltas that were active at session start.
+3. `pnpm session:last [N]` — calls `/admin/sessions` on both `fps_shooter` and `arena` rooms, merges, sorts by recency, pretty-prints markdown with: room, time range, NPCs, legacy ConvAI session transcripts (if any), AND a multi-speaker scene transcript interleaving 🎙 (human, from Deepgram finals) and 🤖 (NPC, from `npc_turn_end` events) lines in arrival order.
+4. For prod: `PARTY_HOST=https://slipstream-rift.<your-username>.partykit.dev pnpm session:last`. Same script, queries the deployed admin endpoint. Secret comes from local `apps/party/.env`.
+5. Streaming prod stdout: `cd apps/party && npx partykit tail --format pretty`. Shows `[EVENT]` lines + `[tick-alive]` heartbeats + uncaught warnings. Useful when `session:last` shows nothing and you need to know why arbitration didn't run.
 
 Admin HTTP routes, all secret-gated by `ELEVENLABS_AGENT_TOOL_SECRET`, scoped per-room (per-DO):
 
@@ -543,15 +640,21 @@ The workbook is the canonical place to plan and track multi-turn work. CLAUDE.md
 
 ## What NOT to do (fork additions)
 
-- Don't put microphone audio through PartyKit in V1. Browser → ElevenLabs direct keeps audio off the Workers runtime, which has tight limits on long-running streams.
-- Don't trust client-side friendship claims. Server is authoritative; client just renders what comes back in snapshots and `npc_context`.
-- Don't bypass `ConsentGate` for testing convenience — Florida two-party consent applies. If you need a dev mode, document it explicitly and gate on a Vite env var so it can't ship.
+- Don't put microphone audio through PartyKit. Browser → Deepgram (STT) + Browser ↔ Browser (peer voice) keeps audio off the Workers runtime, which has tight limits on long-running streams. NPC TTS output is server-broadcast as small base64 chunks — that's the ONE place audio touches the DO, and it's chunked because anything else would saturate.
+- Don't trust client-side friendship claims. Server is authoritative; client just renders what comes back in snapshots.
+- Don't bypass `ConsentGate` for testing convenience — Florida two-party consent applies, and v3 covers Deepgram + Anthropic + WebRTC + ElevenLabs. If you need a dev mode, document it explicitly and gate on a Vite env var so it can't ship.
 - Don't store raw audio. Only transcripts are persisted (and only with consent).
-- **Don't change a bot's `botFollowing` / `botFleeingFrom` / `hostility` / `friendsWith` without calling `pushSelfStateAlert`.** The LLM has no proprioception; without the alert it will confidently deny what its body is doing on the next turn (B10's root cause). Every state-change site must push.
-- **Don't add a new `NpcAlert` kind without also adding a `formatNpcAlert` case.** The default branch returns `null` and silently drops the alert.
-- **Don't decode DO SQLite by hand to look at sessions.** Use `pnpm session:last`. The script walks all rooms, joins events, and renders markdown in one shot. If `session:last` doesn't show what you need, EXTEND IT — that's the durable workflow path (F6).
+- **Don't hand-edit `packages/shared/src/world-bible.ts`.** It's generated by `pnpm bake:bible`. Edit the source HTMLs in `docs/` and rebake; otherwise your edit is wiped on next bake.
+- **Don't change a bot's `botFollowing` / `botFleeingFrom` / `hostility` / `friendsWith` without calling `pushSelfStateAlert`** (legacy ConvAI path) **or relying on the next decoupled-stack prompt to surface the new state** (decoupled path — `buildSelfStateLine` reads live state on every turn). Either way, the LLM needs to know its own body changed.
+- **Don't use `setTimeout` for deferred work inside a DO request handler.** Prod hibernates between events and the callback never fires. Anchor to wall-clock deadlines polled by `runTick` (which is `setInterval`-based via `onStart` and survives). See Gotcha #17 and `apps/party/src/voice/orchestrator.ts:tick`.
+- **Don't push partykit env values via `echo "$VAL" | npx partykit env add KEY`.** The trailing newline breaks downstream auth comparisons (Gotcha #18). Use `printf '%s' "$VAL" | npx partykit env add KEY`.
+- **Don't redeploy the partykit server without rotating `--var ACCESS_CODE`** to whatever's currently in `apps/party/.env`. The `env add` mechanism persists most vars across deploys, but `ACCESS_CODE` is passed via `--var` per CLAUDE.md's deploy command.
+- **Don't add a new tool without updating both `apps/party/src/voice/tools.ts` (Claude schema) and `docs/agent-tools.md` (legacy ConvAI dashboard JSON)** AND adding a branch in `Server.dispatchTool`. Otherwise the tool exists in one path and is invisible in the other.
+- **Don't add a new `FeedbackEvent` kind** without making sure `scripts/session-last.mjs` knows how to render it (or at least falls through to a generic line). Same for the `[EVENT]` parser in `scripts/feedback-report.mjs`.
+- **Don't decode DO SQLite by hand to look at sessions.** Use `pnpm session:last`. If it doesn't show what you need, EXTEND IT — that's the durable workflow path (F6).
 - **Don't add work items outside the workbook ([`docs/workbook.html`](docs/workbook.html)) for anything multi-turn.** The workbook is the canonical tracker; CLAUDE.md is the architectural doc. Status pills + B/F numbering give us a thread to follow across sessions.
-- **Don't PATCH agent system prompts to fix one-off character changes.** Use persona deltas instead (`pnpm npc:state`). The agent's baked persona is the prior baseline; deltas are how in-fiction changes propagate without destroying the persona or requiring rollback machinery.
-- **Don't ship a game mechanic without a `GameChange` entry** if it's something NPCs should be able to talk about. The registry lives in `packages/shared/src/game-changes.ts` and is auto-seeded on `onStart`. Bug fixes that don't change in-game reality (e.g. internal nav improvements) don't need entries; player-visible mechanics (coffee, weapons, mode changes) do.
-- **Don't rename or reuse a `GameChange.id`.** It's the dedup key. If you change an entry's wording after it's seeded into a room, the room keeps the old wording — bump the id to re-seed everywhere.
+- **Don't PATCH agent system prompts to fix one-off character changes.** Use persona deltas instead (`pnpm npc:state`). Same applies under the decoupled stack — persona deltas surface in every prompt under `## What's changed about you`, no agent edit required.
+- **Don't ship a game mechanic without a `GameChange` entry** if it's something NPCs should be able to talk about. The registry lives in `packages/shared/src/game-changes.ts` and is auto-seeded on `onStart`. Bug fixes that don't change in-game reality don't need entries; player-visible mechanics do.
+- **Don't rename or reuse a `GameChange.id`.** It's the dedup key. Bump the id to re-seed everywhere.
+- **Don't put plants, smells, weather, fixtures, hidden rooms, or any other sensory invention into an NPC persona.** The decoupled stack's prompt has an explicit anti-confabulation block, but the LLM still follows persona text. Vicky used to be "she's noticed many small things — DO NOT lead with moss every session" — that was an invitation to fabricate. Now her persona channels curiosity inward (sister's garden, her training, memories) and the prompt forbids inventing what's in the current room. Keep new personas in that mold.
 - **Don't assume cross-room state continuity.** Each map's PartyKit room is its own DO. Transcripts, friendships, persona deltas, last-session timestamps are all per-room. A delta written on `fps_shooter` is invisible on `arena`. Either accept this v1 limitation or implement a global state plane.

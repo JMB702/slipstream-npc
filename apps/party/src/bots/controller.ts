@@ -2,6 +2,7 @@ import {
   BOT,
   COFFEE_NAV_POSITION,
   PLAYER,
+  POSE,
   TICK_MS,
   WEAPON,
   type BotProfile,
@@ -161,6 +162,34 @@ export const tickBot = (
     return false;
   }
 
+  // Rob's signature fight stance. Rolls randomly while patrolling — gives the
+  // character a moment of "checking the room" body language between casual
+  // strolls. Restricted to Rob's NPC. Conditions to roll:
+  //   - bot is Rob (npcId === 'rob')
+  //   - currently in casual_idle (not mid-pose, not engaged)
+  //   - not in a voice conversation (let the agent drive there)
+  //   - botState is patrol (not engage/hunt)
+  //   - POSE.fightIdleCooldownMs elapsed since last fight_idle
+  //   - the per-tick die roll succeeds
+  if (
+    bot.npcId === 'rob' &&
+    bot.pose === 'casual_idle' &&
+    !bot.botConversationWith &&
+    (bot.botState === undefined || bot.botState === 'patrol')
+  ) {
+    const lastAt = bot.lastFightIdleAt ?? 0;
+    if (
+      now - lastAt > POSE.fightIdleCooldownMs &&
+      Math.random() < POSE.fightIdleRollProb
+    ) {
+      setPose(bot, 'fight_idle', null, 0, now);
+      bot.lastFightIdleAt = now;
+      bot.botPath = undefined;
+      bot.botGoal = null;
+      return false;
+    }
+  }
+
   const targetCheckDue =
     bot.botLastTargetCheckAt === undefined ||
     now - bot.botLastTargetCheckAt >= BOT.targetReacquireMs;
@@ -198,6 +227,9 @@ export const tickBot = (
       bot.botEngagedAt = now;
       bot.botPath = undefined;
     }
+    // Engage cancels any in-flight smoke. Combat preempts the emote and the
+    // rifle-aim animation will visibly override smoke anyway.
+    bot.botSmokeUntil = undefined;
   } else if (target && !hasLOS && bot.botLastSawTargetAt !== undefined) {
     if (bot.botState !== 'hunt') {
       bot.botState = 'hunt';
@@ -206,11 +238,36 @@ export const tickBot = (
     } else {
       bot.botGoal = target.position;
     }
+    bot.botSmokeUntil = undefined;
   } else {
     if (bot.botState !== 'patrol') {
       bot.botState = 'patrol';
       bot.botPath = undefined;
       bot.botGoal = null;
+    }
+  }
+
+  // Rob's frequent smoking habit. Casual-mode patrol only; combat / hunt
+  // preempt (cleared in the transitions above). ~25% chance every 5s window
+  // → smokes roughly once per 20s. Holds for 6s — server's applyInput cancels
+  // it the moment forward/right exceed the small deadzone, so this is the
+  // CEILING, not a guarantee.
+  if (
+    bot.npcId === 'rob' &&
+    bot.botState === 'patrol' &&
+    bot.pose === 'casual_idle'
+  ) {
+    const SMOKE_DURATION_MS = 6000;
+    const SMOKE_CHECK_INTERVAL_MS = 5000;
+    if (bot.botSmokeUntil === undefined) {
+      if (bot.botSmokeNextCheckAt === undefined || now >= bot.botSmokeNextCheckAt) {
+        bot.botSmokeNextCheckAt = now + SMOKE_CHECK_INTERVAL_MS;
+        if (Math.random() < 0.25) {
+          bot.botSmokeUntil = now + SMOKE_DURATION_MS;
+        }
+      }
+    } else if (now >= bot.botSmokeUntil) {
+      bot.botSmokeUntil = undefined;
     }
   }
 
@@ -492,6 +549,16 @@ export const tickBot = (
     }
   }
 
+  // Rob is mid-smoke: zero locomotion so applyInput's "moving cancels smoke"
+  // gate doesn't immediately fire. Bot stays planted through the emote.
+  const smoking = bot.botSmokeUntil !== undefined && now < bot.botSmokeUntil;
+  if (smoking) {
+    forward = 0;
+    right = 0;
+    sprint = false;
+    jump = false;
+  }
+
   // Build the input frame and route it through the same pipeline humans use.
   const seq = (bot.botInputSeq ?? 0) + 1;
   bot.botInputSeq = seq;
@@ -506,11 +573,16 @@ export const tickBot = (
     sprint: sprint && !fire,
     fire,
     reload: wantsReload,
+    smoke: smoking,
     interact: false,
     yaw,
     pitch,
     // Bots don't have a camera; server falls back to eye + yaw/pitch when
     // these are null. (No third-person parallax problem to solve.)
+    // cameraYaw mirrors yaw for bots — no free-orbit camera exists for them,
+    // so casual-mode applyMovement walking-direction logic reads the same
+    // yaw the bot is facing.
+    cameraYaw: yaw,
     aimOrigin: null,
     aim: null,
   };

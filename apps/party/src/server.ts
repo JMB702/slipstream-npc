@@ -21,6 +21,7 @@ import {
   npcById,
   setActiveMap,
   type BotDifficulty,
+  type CharacterId,
   type ClientMessage,
   type GameEvent,
   type GameSnapshot,
@@ -35,6 +36,7 @@ import {
   advancePoseTransition,
   applyAgentPose,
   applyInput,
+  tickPoseTimeout,
   clearPose,
   finishReload,
   integrateIdle,
@@ -51,6 +53,7 @@ import { ensureBotDefaults, tickBot } from './bots/controller.js';
 import { adoptHostility, clearHostility, pruneHostility } from './social.js';
 import { GameStorage, type NpcStateEntry } from './storage.js';
 import { VoiceOrchestrator, npcDefToCandidate } from './voice/orchestrator.js';
+import { invalidateAgentVoiceCache } from './voice/agent-config.js';
 import type { ArbCandidate } from './voice/arbitration.js';
 
 export const CONSENT_VERSION = 'v1';
@@ -303,6 +306,7 @@ export default class SlipstreamServer implements Party.Server {
   // LLM/TTS pipeline + audio broadcast. Created in onStart so room.env is
   // available; disposed in onClose-when-empty-room flows.
   private voice: VoiceOrchestrator;
+  private _tickCount: number = 0;
 
   // Instance-scoped event emitter. Same contract as the previous module
   // function but pushes onto this room's buffer instead of a shared one.
@@ -451,9 +455,17 @@ export default class SlipstreamServer implements Party.Server {
       // soften live opponents mid-match.
       this.botCountLocked = true;
     }
+    // Username → avatar override. A player whose name normalizes to "rob"
+    // spawns with Rob's mesh; everyone else gets the default soldier. Case-
+    // insensitive exact match (no fuzzy matching on "Robert", "Bobby" etc).
+    // The Rob NPC bot still spawns separately from the roster — if a human
+    // Rob and NPC Rob share a room they collide on name-keyed state
+    // (friendship, transcripts) per the v1 limitation in CLAUDE.md.
+    const normalizedName = name.trim().toLowerCase();
+    const characterId: CharacterId = normalizedName === 'rob' ? 'rob' : 'soldier';
     const player = initialPlayer(conn.id, conn.id, name, randomSpawn(), this.serverTime(), {
       isBot: false,
-      characterId: 'soldier',
+      characterId,
     });
     this.players.set(conn.id, player);
     this.spawnBots(this.serverTime());
@@ -670,12 +682,19 @@ export default class SlipstreamServer implements Party.Server {
         // play stand_up before sit→null — the server derives it from the
         // current pose. The explicit `transition` field on the message is
         // ignored; applyAgentPose owns the transition state machine.
+        // fight_idle is Rob-only — silently drop the message from any other
+        // character so a crafted client can't pop into Rob's signature stance.
+        if (msg.pose === 'fight_idle' && player.characterId !== 'rob') {
+          return;
+        }
+        const now = this.serverTime();
         applyAgentPose(
           player,
           msg.pose,
           msg.danceVariant ?? 0,
-          this.serverTime(),
+          now,
         );
+        if (msg.pose === 'fight_idle') player.lastFightIdleAt = now;
         return;
       }
       case 'voice_state': {
@@ -1171,6 +1190,20 @@ export default class SlipstreamServer implements Party.Server {
       return jsonResponse({ ok: true, room: this.room.id, serverTime: now, players });
     }
 
+    // Drop the cached ElevenLabs Agent → voice id mapping. Lets a UI-driven
+    // voice change in the ElevenLabs console propagate to the game on the
+    // next NPC turn without waiting out the cache TTL. POST with optional
+    // ?agentId=... to scope to one agent; no agentId clears the whole cache.
+    if (
+      (req.method === 'POST' || req.method === 'DELETE') &&
+      url.pathname.endsWith('/admin/voice-cache')
+    ) {
+      const agentId =
+        q.get('agentId') ?? (body as Record<string, string | undefined>).agentId ?? '';
+      invalidateAgentVoiceCache(agentId || undefined);
+      return jsonResponse({ ok: true, cleared: agentId || 'all' });
+    }
+
     // Tool routes — POST only, require npcId + playerName + recorded consent.
     // Some already-published agent tools may omit playerName but include the
     // active sessionId. Infer the human from that live session so the tool
@@ -1398,7 +1431,7 @@ export default class SlipstreamServer implements Party.Server {
   }
 
   private handleSetPoseTool(npc: NpcDef, poseRaw: string, danceVariant: number): Response {
-    const VALID_POSES = ['casual_idle', 'lean_wall', 'sit', 'lay', 'dance', 'clear'] as const;
+    const VALID_POSES = ['casual_idle', 'lean_wall', 'sit', 'lay', 'dance', 'fight_idle', 'clear'] as const;
     const ok = (VALID_POSES as readonly string[]).includes(poseRaw);
     const bot = Array.from(this.players.values()).find(
       (p) => p.isBot && p.npcId === npc.id,
@@ -1411,8 +1444,19 @@ export default class SlipstreamServer implements Party.Server {
       this.emit({ kind: 'tool_call', tool: 'set_pose', npcId: npc.id, playerName: '', args: { pose: poseRaw }, ok: false });
       return jsonResponse({ error: 'npc not spawned' }, 404);
     }
+    // fight_idle is Rob's signature stance — gated to Rob's NPC only. Any
+    // other persona requesting it gets rejected with a clear error so the
+    // agent prompt can know not to surface this as an option.
+    if (poseRaw === 'fight_idle' && npc.id !== 'rob') {
+      this.emit({ kind: 'tool_call', tool: 'set_pose', npcId: npc.id, playerName: '', args: { pose: poseRaw }, ok: false });
+      return jsonResponse({ error: 'fight_idle is reserved for Rob' }, 403);
+    }
     const target: Pose = poseRaw === 'clear' ? null : (poseRaw as Pose);
-    applyAgentPose(bot, target, danceVariant, this.serverTime());
+    const now = this.serverTime();
+    applyAgentPose(bot, target, danceVariant, now);
+    // Stamp Rob's fight_idle cooldown so the random roller doesn't re-fire
+    // back-to-back the moment this agent-driven stance expires.
+    if (target === 'fight_idle') bot.lastFightIdleAt = now;
     this.emit({
       kind: 'tool_call',
       tool: 'set_pose',
@@ -1646,12 +1690,16 @@ export default class SlipstreamServer implements Party.Server {
 
   private runTick(): void {
     // Drive the voice orchestrator's deferred work (transcript-arb hold,
-    // NPC turn finalize) off this setInterval-based tick. Standalone
-    // setTimeouts inside DO request handlers don't reliably fire in
-    // Cloudflare prod once the request returns; setInterval timers
-    // anchored in onStart survive. See CLAUDE.md gotcha #11 for the
-    // sibling rule about room.env.
+    // NPC turn finalize) off this setInterval-based tick.
     this.voice.tick();
+    // Diagnostic: log a single line every ~5s so we can verify the tick
+    // is actually running in prod (Cloudflare DOs hibernate aggressively;
+    // setInterval may not survive between WebSocket events on prod).
+    // Remove once verified.
+    this._tickCount = (this._tickCount ?? 0) + 1;
+    if (this._tickCount % 150 === 0) {
+      console.log('[tick-alive]', this._tickCount, 'players=' + this.players.size);
+    }
     const now = this.serverTime();
     const all = Array.from(this.players.values());
 
@@ -1660,6 +1708,7 @@ export default class SlipstreamServer implements Party.Server {
       maybeRespawn(p, now);
       regenHealth(p, now);
       advancePoseTransition(p, now);
+      tickPoseTimeout(p, now);
       const expired = pruneHostility(p, now);
       // If a bot's hostility timer ran out and it's mid-session, tell the
       // agent — otherwise it has no way to know it should stop being angry.
@@ -2700,6 +2749,7 @@ const stripServerOnly = (p: ServerPlayer) => ({
   reloading: p.reloading,
   reloadDoneAt: p.reloadDoneAt,
   vaulting: p.vaulting,
+  smoking: p.smoking,
   kills: p.kills,
   deaths: p.deaths,
   lastSeenSeq: p.lastSeenSeq,

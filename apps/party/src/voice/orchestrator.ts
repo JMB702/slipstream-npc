@@ -18,6 +18,8 @@ import {
   type SceneSpeechLine,
 } from './scene-prompt.js';
 import { TurnState } from './turn-state.js';
+import { cleanMetaNarration } from './meta-filter.js';
+import { getAgentVoiceId } from './agent-config.js';
 import type { NpcStateEntry } from '../storage.js';
 
 // Per-room orchestrator. Wires the TurnState machine to the actual LLM
@@ -37,7 +39,12 @@ import type { NpcStateEntry } from '../storage.js';
 
 const SELF_TURN_HISTORY_LEN = 5;
 const SCENE_WINDOW_MS = 90_000;
-const MAX_TOKENS_PER_TURN = 200;
+// Was 200 — too tight once the `think` tool was introduced. Observed
+// failure: model spent ~80 tokens on think.scratch reasoning, then ran out
+// of budget before opening the `say` content block, producing empty turns.
+// 600 leaves comfortable headroom for ~100 tokens of think + ~150 tokens
+// of dialogue. Bump again if Rob's pyramid story keeps getting truncated.
+const MAX_TOKENS_PER_TURN = 600;
 // Pinned model id. The 3.5 Haiku snapshots were retired; current Haiku
 // is the 4.5 line. Use the dated snapshot for stability — bump when a
 // newer Haiku ships. List available models with `curl /v1/models`.
@@ -339,14 +346,22 @@ export class VoiceOrchestrator {
       this.finishTurn(npcId, utteranceId, false);
       return;
     }
-    // Voice id: prefer the explicit `voiceId` field on NpcDef when set
-    // (rare today — only useful for an NPC who needs a voice that differs
-    // from every other NPC with the same characterId), otherwise fall
-    // back to the character-keyed VOICE_BY_CHARACTER map. The legacy
-    // ConvAI path didn't need this because the voice was baked into the
-    // ElevenLabs agent server-side; the decoupled stack calls the TTS
-    // endpoint directly, so we have to resolve the id here.
-    const voiceId = candidate.npc.voiceId ?? voiceForCharacter(candidate.npc.characterId);
+    // Voice id resolution order:
+    //   1. Live agent config from ElevenLabs (cached). Lets you change the
+    //      voice in the ElevenLabs UI and have it propagate to the game
+    //      without a code edit. Returns null when the agent id is a
+    //      placeholder, the API key is missing, or the fetch fails — at
+    //      which point we fall through.
+    //   2. Explicit NpcDef.voiceId override (rarely set).
+    //   3. Per-character VOICE_BY_CHARACTER fallback (always populated).
+    const liveAgentVoice = await getAgentVoiceId(
+      candidate.npc.agentId,
+      keys.elevenlabs,
+    );
+    const voiceId =
+      liveAgentVoice ??
+      candidate.npc.voiceId ??
+      voiceForCharacter(candidate.npc.characterId);
     if (!voiceId) {
       console.warn(`[orchestrator] npc ${npcId} has no resolvable voiceId; skipping`);
       this.finishTurn(npcId, utteranceId, false);
@@ -412,21 +427,90 @@ export class VoiceOrchestrator {
         signal,
       });
       // Split the LLM event stream into:
-      //   - text deltas → TTS pipeline (accumulated into active.textBuf)
-      //   - tool_use events → dispatch into the server's game handlers
-      // The text-only sub-stream is what tts-stream consumes; tool_use
-      // events fire fire-and-forget callbacks on the way through.
+      //   - tool_use(say) events  → concatenated lines forwarded to TTS
+      //   - other tool_use events → dispatch into the server's game handlers
+      //   - raw text deltas       → discarded (the structural anti-meta gate)
+      //
+      // The model is instructed to emit ALL spoken dialogue through the
+      // `say` tool. Free text outside the tool is silently dropped, which
+      // eliminates the meta-narration leak class entirely: there's no
+      // channel for the model to read system messages, markdown bullets,
+      // or its own reasoning aloud. The legacy text-buffer path used to
+      // pipe raw text through `cleanMetaNarration`; we keep that as a
+      // backstop only if the model ignores the tool and emits text anyway,
+      // which logs a warning.
       const teeStream = (async function* (this: VoiceOrchestrator) {
+        const spokenParts: string[] = [];
+        let strayText = '';
         for await (const evt of llmStream) {
           if (evt.type === 'text') {
-            if (this.active && this.active.utteranceId === utteranceId) {
-              this.active.textBuf += evt.delta;
-            }
-            yield evt.delta;
+            strayText += evt.delta;
           } else if (evt.type === 'tool_use') {
-            this.ctx.dispatchTool(npcId, primarySpeaker, evt.name, evt.input);
+            if (evt.name === 'think') {
+              // Architectural meta-narration fix: `think` is the model's
+              // private scratch pad. We OBSERVE the reasoning (so we can
+              // see what the model was thinking when debugging) but never
+              // forward it anywhere. The TTS pipeline has no code path
+              // that could route this to the speaker — it's a construction-
+              // level guarantee, not a filter.
+              const scratch = (evt.input as { scratch?: unknown })?.scratch;
+              const text = typeof scratch === 'string' ? scratch.trim() : '';
+              if (text.length > 0) {
+                console.log(
+                  `[think] ${npcId}: ${text.slice(0, 300)}${text.length > 300 ? '…' : ''}`,
+                );
+              }
+              continue;
+            }
+            if (evt.name === 'say') {
+              const raw = (evt.input as { line?: unknown })?.line;
+              const rawLine = typeof raw === 'string' ? raw.trim() : '';
+              if (rawLine.length === 0) continue;
+              // Even with the say-tool structural gate + think-tool sanctioned
+              // reasoning channel, paranoia: a regression in the model could
+              // still see it put meta into `line:`. The cleaner is the
+              // last-line defense.
+              const cleanedLine = cleanMetaNarration(rawLine);
+              if (cleanedLine.length === 0) {
+                console.log(
+                  `[say-tool] ${npcId} say() contained only meta; dropped. raw=${rawLine.slice(0, 200)}`,
+                );
+                continue;
+              }
+              if (cleanedLine !== rawLine) {
+                console.log(
+                  `[say-tool] ${npcId} say() cleaned ${rawLine.length}→${cleanedLine.length}`,
+                );
+              }
+              spokenParts.push(cleanedLine);
+            } else {
+              this.ctx.dispatchTool(npcId, primarySpeaker, evt.name, evt.input);
+            }
           }
         }
+        const spoken = spokenParts.join(' ').trim();
+        // Backstop: if the model emits raw text instead of using `say`,
+        // log it and fall back to the cleaner so the player still hears
+        // something. The new tool-based path SHOULD make this 0% of turns.
+        let final = spoken;
+        if (final.length === 0 && strayText.trim().length > 0) {
+          const cleaned = cleanMetaNarration(strayText);
+          if (cleaned.length > 0) {
+            console.warn(
+              `[say-tool] ${npcId} emitted raw text instead of calling \`say\`; falling back. raw=${strayText.slice(0, 200)}`,
+            );
+            final = cleaned;
+          } else {
+            console.log(
+              `[say-tool] ${npcId} emitted only meta text, no \`say\` call; staying silent. raw=${strayText.slice(0, 200)}`,
+            );
+            return;
+          }
+        }
+        if (this.active && this.active.utteranceId === utteranceId) {
+          this.active.textBuf = final;
+        }
+        if (final.length > 0) yield final;
       }).call(this);
 
       const audioStream = streamTts({

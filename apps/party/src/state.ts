@@ -95,6 +95,11 @@ export interface ServerPlayer extends PlayerState {
   // started. tickBot and the simulation loop use this to flip transitions to
   // their steady-state pose after the matching POSE.*Ms duration elapses.
   poseStartedAt?: number;
+  // Wall-clock of Rob's most recent fight_idle trigger (random or agent-driven).
+  // Used as the cooldown floor in the random-fire roll inside tickBot so the
+  // stance doesn't fire back-to-back. Only meaningful for Rob's bot; other
+  // NPCs never write this field.
+  lastFightIdleAt?: number;
   // Date.now() of this player's most recent successful coffee drink. Server-
   // only — the wire-visible buff window lives in PlayerState.coffeeBuffUntil.
   // Used for telemetry and for future nonzero cooldowns if we re-enable one.
@@ -106,6 +111,14 @@ export interface ServerPlayer extends PlayerState {
   // or (b) the deadline elapses (couldn't reach the maker — give up).
   // Cleared in both cases.
   botGoingForCoffeeUntil?: number;
+  // Rob's smoking behavior — set while he's mid-smoke during patrol. The bot
+  // controller rolls a stochastic check every botSmokeNextCheckAt window and,
+  // on hit, sets botSmokeUntil to a future deadline. While the deadline is
+  // in the future, the controller emits smoke: true on the bot's InputFrame
+  // and zeroes forward/right so Rob stands still through the animation.
+  // Cleared on engage / hunt / damage so combat preempts the emote.
+  botSmokeUntil?: number;
+  botSmokeNextCheckAt?: number;
 }
 
 export const initialPlayer = (
@@ -130,6 +143,7 @@ export const initialPlayer = (
   reloading: false,
   reloadDoneAt: null,
   vaulting: false,
+  smoking: false,
   kills: 0,
   deaths: 0,
   lastSeenSeq: 0,

@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react';
+import { getKeyboardBinding } from '../controls.js';
 import { setMicEnabled } from './mic.js';
 
 type Listener = (muted: boolean) => void;
@@ -62,7 +63,10 @@ const pollGamepads = (): void => {
 };
 
 const onKeyDown = (e: KeyboardEvent): void => {
-  if (e.key === 'm' || e.key === 'M') {
+  // Read the bound mute key from controls.ts each press so the rebind menu
+  // takes effect live. Defaults to KeyM. Null binding = no keyboard mute.
+  const muteCode = getKeyboardBinding('mute');
+  if (muteCode && e.code === muteCode) {
     // Mute key shouldn't fire when the user is typing into a text input.
     const tag = (e.target as HTMLElement | null)?.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA') return;

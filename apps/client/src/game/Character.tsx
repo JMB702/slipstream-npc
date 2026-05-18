@@ -73,7 +73,7 @@ import {
 // — drei keys its in-memory parse cache by URL, so a stale tab keeps the old
 // clip data even after the file on disk changes. Don't tie this to Date.now()
 // (gotcha #9 — forces re-downloads on every reload for every player).
-const GLB_VERSION = '3';
+const GLB_VERSION = '5';
 const url = (path: string) => `${path}?v=${GLB_VERSION}`;
 const MODEL_URLS: Record<CharacterId, string> = {
   soldier: url('/models/Soldier.glb'),
@@ -85,6 +85,10 @@ const MODEL_URLS: Record<CharacterId, string> = {
   // Guts's new body (5/16). Baked from 3D Assets/Characters/Guts - Dreyar By M.Aure.fbx
   // via the same `pnpm bake:characters Dreyar` pipeline.
   dreyar: url('/models/Dreyar.glb'),
+  // Rob — Meshy-AI mesh, auto-rigged on Mixamo 5/18. Baked from
+  // 3D Assets/Characters/Rob-Meshy_AI_0518184613_texture.fbx. Used by NPC
+  // `rob` and by any human player whose username normalizes to "rob".
+  rob: url('/models/Rob.glb'),
 };
 for (const u of Object.values(MODEL_URLS)) useGLTF.preload(u);
 
@@ -99,6 +103,32 @@ const MODEL_SCALES: Record<CharacterId, number> = {
   // 1.8m. Scale only the visual model so Guts matches the other characters
   // without changing movement, hit detection, or the attached rifle size.
   dreyar: 0.10436,
+  // Rob's Mixamo-rigged Meshy mesh comes out near default character height
+  // at scale 1. Adjust if his head pokes through the ceiling or his feet
+  // float — visual only, hit detection is capsule-based.
+  rob: 1,
+};
+
+// Per-character Y nudge applied INSIDE the wrapper group (after the global
+// `-PLAYER.height/2` offset that puts a feet-origin mesh at ground level).
+// Stock Mixamo characters have their mesh origin at the feet; Meshy-generated
+// meshes that get auto-rigged on Mixamo can end up with the origin elsewhere
+// (pelvis / armature root). Add a small positive value to lift the visual
+// model relative to the capsule center if the character renders sunk into
+// the ground; negative if floating. Visual only — hit detection still keys
+// off the capsule.
+const MODEL_Y_OFFSETS: Record<CharacterId, number> = {
+  soldier: 0,
+  ch15: 0,
+  ch35: 0,
+  eve: 0,
+  maria: 0,
+  medea: 0,
+  dreyar: 0,
+  // Rob renders with roughly the lower body below ground at offset 0 — the
+  // Meshy mesh's pivot sits near the pelvis instead of the feet. Lift by
+  // ~half a body height to put his feet on the floor. Tune by feel.
+  rob: 0.9,
 };
 
 interface Props {
@@ -106,6 +136,9 @@ interface Props {
   yaw: number;
   reloading: boolean;
   vaulting: boolean;
+  // Casual-mode smoke emote. Server gates this on pose === 'casual_idle' +
+  // stationary input; client just plays the Smoke clip while true.
+  smoking?: boolean;
   alive: boolean;
   playerId: PlayerId | null;
   characterId?: CharacterId;
@@ -166,6 +199,7 @@ type ClipKey =
   | 'CasualWalkF'
   | 'CasualRunF'
   | 'LeanWall'
+  | 'FightIdle'
   | 'SitDown'
   | 'SitIdle'
   | 'LayDown'
@@ -173,6 +207,7 @@ type ClipKey =
   | 'StandUp'
   | 'PickUpCoffee'
   | 'DrinkCoffee'
+  | 'Smoke'
   | DanceKey
   | `Walk${Dir}`
   | `Run${Dir}`;
@@ -200,6 +235,11 @@ const CLIP_NAMES: Record<ClipKey, string | null> = {
   CasualWalkF: 'CasualWalkF',
   CasualRunF: 'CasualRunF',
   LeanWall: 'LeanWall',
+  // Rob-only stance. Server gates the pose trigger to characterId === 'rob',
+  // but the clip is baked into every GLB so the state machine always resolves
+  // it. If a non-Rob entity somehow gets pose='fight_idle' (shouldn't), the
+  // clip just plays — the gate exists at the pose-write layer.
+  FightIdle: 'FightIdle',
   SitDown: 'SitDown',
   SitIdle: 'SitIdle',
   LayDown: 'LayDown',
@@ -213,6 +253,10 @@ const CLIP_NAMES: Record<ClipKey, string | null> = {
   // emits the DrinkEvent, but the player won't see a custom animation yet.
   PickUpCoffee: 'PickUp',
   DrinkCoffee: 'Drinking',
+  // Casual-mode smoking emote. Baked from Animations/Smoking.fbx via
+  // canonical-clip-map.json. Plays only when server says smoking === true,
+  // which requires casual mode + stationary stick + no combat actions.
+  Smoke: 'Smoke',
   DanceHipHop: 'DanceHipHop',
   DanceSalsa: 'DanceSalsa',
   DanceSilly: 'DanceSilly',
@@ -255,9 +299,9 @@ const CLIP_TIMESCALE: Record<ClipKey, number> = {
   Reload: 1,
   ReloadWalk: 1,
   ReloadRun: 1,
-  CasualIdle: 1, CasualWalkF: 2, CasualRunF: 1, LeanWall: 1,
+  CasualIdle: 1, CasualWalkF: 2, CasualRunF: 1, LeanWall: 1, FightIdle: 1,
   SitDown: 1, SitIdle: 1, LayDown: 1, LayIdle: 1, StandUp: 1,
-  PickUpCoffee: 1, DrinkCoffee: 1,
+  PickUpCoffee: 1, DrinkCoffee: 1, Smoke: 1,
   DanceHipHop: 1, DanceSalsa: 1, DanceSilly: 1,
   WalkF: 2, WalkFR: 2, WalkR: 2, WalkBR: 2, WalkB: 2, WalkBL: 2, WalkL: 2, WalkFL: 2,
   RunF: 1, RunFR: 1, RunR: 1, RunBR: 1, RunB: 1, RunBL: 1, RunL: 1, RunFL: 1,
@@ -277,6 +321,7 @@ export const Character = ({
   yaw,
   reloading,
   vaulting,
+  smoking = false,
   alive,
   playerId,
   characterId = 'soldier',
@@ -286,6 +331,7 @@ export const Character = ({
 }: Props) => {
   const gltf = useGLTF(MODEL_URLS[characterId] ?? MODEL_URLS.soldier);
   const modelScale = MODEL_SCALES[characterId] ?? 1;
+  const modelYOffset = MODEL_Y_OFFSETS[characterId] ?? 0;
   const cloned = useMemo(() => SkeletonUtils.clone(gltf.scene), [gltf.scene]);
   // Mixamo animations carry root motion in the Hips bone's position track —
   // the character translates forward during Walk/Run, jumps in Y during a
@@ -584,6 +630,7 @@ export const Character = ({
     const deathClip = CLIP_NAMES.Death ? actions[CLIP_NAMES.Death] : undefined;
     const pickupCoffeeClip = CLIP_NAMES.PickUpCoffee ? actions[CLIP_NAMES.PickUpCoffee] : undefined;
     const drinkCoffeeClip = CLIP_NAMES.DrinkCoffee ? actions[CLIP_NAMES.DrinkCoffee] : undefined;
+    const smokeClip = CLIP_NAMES.Smoke ? actions[CLIP_NAMES.Smoke] : undefined;
 
     // Pose lookup — only consulted if the server says we're posed. Falls back
     // to null if the clip isn't in the GLB yet (clips ship gradually).
@@ -611,6 +658,7 @@ export const Character = ({
       : pose === 'sit' ? 'SitIdle'
       : pose === 'lay' ? 'LayIdle'
       : pose === 'dance' ? (DANCE_VARIANTS[Math.max(0, Math.min(POSE.danceVariants - 1, danceVariant))] ?? null)
+      : pose === 'fight_idle' ? 'FightIdle'
       : null;
     const poseTransitionClip = poseTransitionKey ? actions[CLIP_NAMES[poseTransitionKey] ?? ''] : undefined;
     const poseHoldClip = poseHoldKey ? actions[CLIP_NAMES[poseHoldKey] ?? ''] : undefined;
@@ -639,6 +687,12 @@ export const Character = ({
       desired = 'DrinkCoffee';
     } else if (poseTransitionKey && poseTransitionClip) {
       desired = poseTransitionKey;
+    } else if (smoking && smokeClip && !airborne && speed < IDLE_SPEED && pose === 'casual_idle') {
+      // Smoke outranks the CasualIdle hold so the Smoke clip plays instead of
+      // the default standing-around loop. Locked to casual mode + standing
+      // still — the server cancels smoking on movement / fire / pose change
+      // anyway, so this is a defensive gate as well as the priority signal.
+      desired = 'Smoke';
     } else if (poseHoldKey && poseHoldClip) {
       desired = poseHoldKey;
     } else if (vaulting && vaultClip) {
@@ -696,7 +750,7 @@ export const Character = ({
       next.fadeIn(0.15).play();
     }
     currentAnim.current = wanted;
-  }, [velocity, yaw, reloading, vaulting, alive, firing, drinkPhase, drinkSession, actions, pose, poseTransition, danceVariant]);
+  }, [velocity, yaw, reloading, vaulting, smoking, alive, firing, drinkPhase, drinkSession, actions, pose, poseTransition, danceVariant]);
 
   // Note: deliberately NOT returning null when !alive — we want the corpse
   // to remain visible playing the Death clip until the server respawns the
@@ -711,7 +765,7 @@ export const Character = ({
   // makes bone-attached children invisible.
   return (
     <group ref={wrapperRef} position={[0, -PLAYER.height / 2, 0]} rotation={[0, Math.PI, 0]}>
-      <group scale={modelScale}>
+      <group scale={modelScale} position={[0, modelYOffset, 0]}>
         <primitive object={cloned} />
       </group>
       <CharacterGun gunMeshRef={gunMeshRef} />
