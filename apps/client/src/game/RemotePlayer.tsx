@@ -90,6 +90,7 @@ export const RemotePlayer = ({ id }: Props) => {
         yaw={player.yaw}
         reloading={player.reloading}
         vaulting={player.vaulting}
+        smoking={player.smoking}
         playerId={id}
         isBot={player.isBot}
         isFriend={isFriend}

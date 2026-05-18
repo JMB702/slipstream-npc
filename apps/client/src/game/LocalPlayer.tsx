@@ -11,6 +11,7 @@ import {
   type Vec3,
 } from '@slipstream-npc/shared';
 import { useGame } from '../store.js';
+import { getGamepadBinding, getKeyboardBinding } from '../controls.js';
 import { createInput } from './input.js';
 import { setActiveInput, setPredictedState, consumeFire, consumeInteractHold, getDrinkLockedYaw } from './local-state.js';
 import { castCameraRay, findAimTarget, stampAimedAt } from './aim-state.js';
@@ -61,74 +62,96 @@ export const LocalPlayer = ({ send, myName }: Props) => {
   //
   // Ignored while a text input is focused so name entry can't accidentally
   // seat the player.
+  // Pose / mode controls. All keys are rebindable via the controls menu —
+  // this handler dispatches based on the current binding registry instead
+  // of hardcoded codes. See controls.ts for defaults.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.repeat) return;
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA')) return;
-      switch (e.code) {
-        case 'KeyY': {
-          // Read combat-vs-not directly. Nullish coalescing on .pose collapses
-          // `null` (combat) into the same bucket as missing-snapshot, which
-          // would lock the player in combat forever (the toggle always
-          // re-sends pose: null). Compare the snapshot field explicitly.
-          const me = useGame.getState().snapshots.at(-1)?.players.get(useGame.getState().myId ?? '');
-          const inCombat = me?.pose === null;
-          send({ type: 'set_pose', pose: inCombat ? 'casual_idle' : null });
-          break;
-        }
-        case 'Digit1':
-          send({ type: 'set_pose', pose: 'casual_idle' });
-          break;
-        case 'Digit2':
-          send({ type: 'set_pose', pose: null });
-          break;
-        case 'Digit3':
-          send({ type: 'set_pose', pose: 'lean_wall' });
-          break;
-        case 'Digit4':
-          send({ type: 'set_pose', pose: 'sit' });
-          break;
-        case 'Digit5':
-          send({ type: 'set_pose', pose: 'lay' });
-          break;
-        case 'Digit6':
-          send({ type: 'set_pose', pose: 'dance', danceVariant: 0 });
-          break;
-        case 'Digit7':
-          send({ type: 'set_pose', pose: 'dance', danceVariant: 1 });
-          break;
-        case 'Digit8':
-          send({ type: 'set_pose', pose: 'dance', danceVariant: 2 });
-          break;
-        default:
-          return;
+
+      // Toggle combat ↔ casual. Reads pose from snapshot explicitly so
+      // a missing snapshot can't collapse `null` (combat) into the same
+      // bucket and lock the player in combat forever.
+      if (e.code === getKeyboardBinding('toggle_combat')) {
+        const me = useGame.getState().snapshots.at(-1)?.players.get(useGame.getState().myId ?? '');
+        const inCombat = me?.pose === null;
+        send({ type: 'set_pose', pose: inCombat ? 'casual_idle' : null });
+        return;
+      }
+      if (e.code === getKeyboardBinding('pose_casual')) {
+        send({ type: 'set_pose', pose: 'casual_idle' });
+        return;
+      }
+      if (e.code === getKeyboardBinding('pose_combat')) {
+        send({ type: 'set_pose', pose: null });
+        return;
+      }
+      if (e.code === getKeyboardBinding('pose_lean')) {
+        send({ type: 'set_pose', pose: 'lean_wall' });
+        return;
+      }
+      if (e.code === getKeyboardBinding('pose_sit')) {
+        send({ type: 'set_pose', pose: 'sit' });
+        return;
+      }
+      if (e.code === getKeyboardBinding('pose_lay')) {
+        send({ type: 'set_pose', pose: 'lay' });
+        return;
+      }
+      if (e.code === getKeyboardBinding('pose_dance_hiphop')) {
+        send({ type: 'set_pose', pose: 'dance', danceVariant: 0 });
+        return;
+      }
+      if (e.code === getKeyboardBinding('pose_dance_salsa')) {
+        send({ type: 'set_pose', pose: 'dance', danceVariant: 1 });
+        return;
+      }
+      if (e.code === getKeyboardBinding('pose_dance_silly')) {
+        send({ type: 'set_pose', pose: 'dance', danceVariant: 2 });
+        return;
+      }
+      if (e.code === getKeyboardBinding('pose_fight_idle')) {
+        // Rob-only. The server enforces this too (the /tools/set_pose
+        // webhook rejects fight_idle for non-Rob NPCs and the simulation
+        // will accept any local-player set_pose, so the client gate here
+        // is what stops Maria/Vicky/etc. from popping into Rob's stance
+        // when their player hits Digit9). Reads characterId from the
+        // latest snapshot — `myId` resolves on first welcome message.
+        const meForFight = useGame.getState().snapshots.at(-1)?.players.get(useGame.getState().myId ?? '');
+        if (meForFight?.characterId !== 'rob') return;
+        send({ type: 'set_pose', pose: 'fight_idle' });
+        return;
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [send]);
 
-  // Xbox controller: B (button 1) toggles combat/casual. Easy thumb reach
-  // without breaking aim (vs RB which forces a hand reposition), and clear of
-  // the taken bindings (A=jump, X=reload, Y=mute, LT/RT=aim/fire, LSB=sprint).
+  // Xbox controller: rebindable combat/casual toggle. Defaults to B (idx 1),
+  // chosen for easy thumb reach without breaking aim. Reads the bound index
+  // from controls.ts each poll so rebinding takes effect live.
   useEffect(() => {
     let raf = 0;
     let prevPressed = false;
     const poll = () => {
       const pads = navigator.getGamepads ? navigator.getGamepads() : [];
+      const btnIdx = getGamepadBinding('toggle_combat');
       let pressed = false;
-      for (const pad of pads) {
-        if (!pad) continue;
-        if (pad.buttons[1]?.pressed) {
-          pressed = true;
-          break;
+      if (btnIdx !== null) {
+        for (const pad of pads) {
+          if (!pad) continue;
+          if (pad.buttons[btnIdx]?.pressed) {
+            pressed = true;
+            break;
+          }
         }
       }
       if (pressed && !prevPressed) {
-        // See the KeyY handler for the bug this avoids — `null ?? 'casual_idle'`
-        // collapses combat-mode and missing-snapshot into one bucket, locking
-        // the toggle.
+        // See the keyboard handler for the bug this avoids — `null ??
+        // 'casual_idle'` collapses combat-mode and missing-snapshot into
+        // one bucket, locking the toggle.
         const me = useGame.getState().snapshots.at(-1)?.players.get(useGame.getState().myId ?? '');
         const inCombat = me?.pose === null;
         send({ type: 'set_pose', pose: inCombat ? 'casual_idle' : null });
@@ -204,9 +227,18 @@ export const LocalPlayer = ({ send, myName }: Props) => {
         sprint: live.sprint && !fired,
         fire: fired,
         reload: live.reload,
+        // Server gates the actual `smoking` state on casual-mode pose +
+        // stationary-stick; client just passes the button intent.
+        smoke: live.smoke,
         interact: interacted,
         yaw: live.yaw,
         pitch: live.pitch,
+        // cameraYaw mirrors yaw on the wire — both are mouse-driven.
+        // applyMovement reads cameraYaw for velocity rotation in casual mode
+        // (RDR2-style: body lerps separately toward velocity direction); in
+        // combat mode the two are equal so either path produces the same
+        // result.
+        cameraYaw: live.yaw,
         aimOrigin,
         aim,
       };
@@ -276,6 +308,9 @@ export const LocalPlayer = ({ send, myName }: Props) => {
       pitch: me.pitch,
       grounded: me.position[1] <= PLAYER.height / 2 + 0.001,
       coffeeBuffUntil: me.coffeeBuffUntil,
+      // Pose drives applyMovement's casual-mode branch (RDR2 free-orbit).
+      // Server is authoritative; client just mirrors the latest snapshot.
+      pose: me.pose,
     };
     // Server freezes the body during a drink (see applyInput's drinkingUntil
     // branch). Mirror it on the client so prediction doesn't fight the
@@ -301,9 +336,11 @@ export const LocalPlayer = ({ send, myName }: Props) => {
           sprint: live.sprint,
           fire: false,
           reload: false,
+          smoke: live.smoke,
           interact: false,
           yaw: live.yaw,
           pitch: live.pitch,
+          cameraYaw: live.yaw,
           // Local-only prediction frame; never serialized over the wire.
           aimOrigin: null,
           aim: null,
@@ -319,6 +356,7 @@ export const LocalPlayer = ({ send, myName }: Props) => {
         pitch: live?.pitch ?? me.pitch,
         grounded: true,
         coffeeBuffUntil: me.coffeeBuffUntil,
+        pose: me.pose,
       };
     }
 
@@ -363,6 +401,7 @@ export const LocalPlayer = ({ send, myName }: Props) => {
         yaw={me?.yaw ?? 0}
         reloading={me?.reloading ?? false}
         vaulting={me?.vaulting ?? false}
+        smoking={me?.smoking ?? false}
         playerId={myId ?? null}
         characterId={me?.characterId}
         voiceIcon={localVoiceIcon}

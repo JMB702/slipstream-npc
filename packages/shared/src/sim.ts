@@ -1,7 +1,7 @@
 import { COFFEE, PLAYER, type Obstacle } from './constants.js';
 import { getActiveMap } from './maps.js';
 import type { InputFrame } from './messages.js';
-import type { Vec3 } from './state.js';
+import type { Pose, Vec3 } from './state.js';
 
 export interface MovableState {
   position: Vec3;
@@ -13,14 +13,54 @@ export interface MovableState {
   // speed gets COFFEE.sprintMultiplier applied. Optional so plain MovableState
   // callers (tests, future props) don't have to set it.
   coffeeBuffUntil?: number;
+  // Optional pose hook for casual-mode movement. When 'casual_idle',
+  // applyMovement rotates the stick vector by cameraYaw (camera-relative,
+  // RDR2-style) and lerps body yaw toward the velocity direction instead of
+  // snapping to the camera. Anything else (including undefined) keeps the
+  // legacy FPS-style "body locked to camera" behavior.
+  pose?: Pose;
 }
+
+// Body-rotation speed in casual mode, in radians per second. ~460°/s — snappy
+// enough not to feel slow, gentle enough to read as a turn rather than a snap.
+export const CASUAL_TURN_RATE = 8;
+
+// Minimum stick magnitude before casual mode treats input as "moving" and
+// rotates the body toward velocity. Below this, the body holds its yaw so a
+// stationary player doesn't twitch when the stick wiggles inside its dead zone.
+const CASUAL_MOVE_THRESHOLD = 0.15;
+
+// Shortest-arc angle lerp, capped by `maxStep` radians. Wraps the result back
+// into [-π, π] so successive applications don't accumulate large absolute
+// numbers.
+const lerpAngle = (from: number, to: number, maxStep: number): number => {
+  let diff = to - from;
+  while (diff > Math.PI) diff -= Math.PI * 2;
+  while (diff < -Math.PI) diff += Math.PI * 2;
+  if (Math.abs(diff) <= maxStep) return to;
+  return from + Math.sign(diff) * maxStep;
+};
 
 export const applyMovement = (state: MovableState, input: InputFrame): MovableState => {
   const { obstacles: OBSTACLES, size: mapSize } = getActiveMap();
   const HALF_MAP = mapSize / 2;
-  const yaw = input.yaw;
-  const pitch = clamp(input.pitch, -Math.PI / 2 + 0.01, Math.PI / 2 - 0.01);
   const dt = Math.min(input.dtMs, 100) / 1000;
+  const isCasual = state.pose === 'casual_idle';
+  // Casual mode: rotate the stick vector by the camera direction (RDR2-style),
+  // so pushing the stick forward moves the character in the direction the
+  // camera is facing in world space regardless of body orientation. Combat
+  // mode: same as before — input.yaw is camera AND body, so the body strafes.
+  // Defensive fallback: an older client (stale cache, partial JSON) could
+  // send a frame without `cameraYaw`. Falling back to `input.yaw` prevents
+  // NaN propagation into vx/vz/position that would otherwise pin the player
+  // at 0,0,0 permanently (since NaN positions don't pass collision checks).
+  const rawCameraYaw = input.cameraYaw;
+  const cameraYaw =
+    typeof rawCameraYaw === 'number' && Number.isFinite(rawCameraYaw)
+      ? rawCameraYaw
+      : input.yaw;
+  const velocityYaw = isCasual ? cameraYaw : input.yaw;
+  const pitch = clamp(input.pitch, -Math.PI / 2 + 0.01, Math.PI / 2 - 0.01);
 
   const coffeeActive =
     state.coffeeBuffUntil !== undefined && Date.now() < state.coffeeBuffUntil;
@@ -29,11 +69,30 @@ export const applyMovement = (state: MovableState, input: InputFrame): MovableSt
   const fwd = clamp(input.forward, -1, 1);
   const strafe = clamp(input.right, -1, 1);
 
-  const sin = Math.sin(yaw);
-  const cos = Math.cos(yaw);
+  const sin = Math.sin(velocityYaw);
+  const cos = Math.cos(velocityYaw);
 
   let vx = (-sin * fwd + cos * strafe) * speed;
   let vz = (-cos * fwd - sin * strafe) * speed;
+
+  // Resolve the body yaw the rest of the integrator (and the returned state)
+  // will use. Combat mode snaps body to camera (legacy behavior). Casual mode
+  // keeps the body where it was unless the player is actively moving — then
+  // lerp toward the velocity direction at CASUAL_TURN_RATE.
+  let yaw = input.yaw;
+  if (isCasual) {
+    const movingHard = Math.hypot(fwd, strafe) > CASUAL_MOVE_THRESHOLD;
+    if (movingHard) {
+      // atan2(-vx, -vz) puts yaw=0 along world -Z, matching the sin/cos
+      // velocity convention above so the body faces its travel vector.
+      const targetYaw = Math.atan2(-vx, -vz);
+      yaw = lerpAngle(state.yaw, targetYaw, CASUAL_TURN_RATE * dt);
+    } else {
+      // Stationary stick → body holds its current yaw. Camera continues to
+      // orbit freely because the camera reads cameraYaw, not body yaw.
+      yaw = state.yaw;
+    }
+  }
 
   let vy = state.velocity[1];
   let grounded = state.grounded;
@@ -171,12 +230,34 @@ export const applyMovement = (state: MovableState, input: InputFrame): MovableSt
   px = clamp(px, -HALF_MAP + r, HALF_MAP - r);
   pz = clamp(pz, -HALF_MAP + r, HALF_MAP - r);
 
+  // Last-resort NaN sanitization. If any earlier branch slipped a NaN into
+  // px / py / pz / yaw / pitch (e.g. via an undefined input field), fall
+  // back to the previous state value rather than persisting NaN through to
+  // the snapshot — once NaN lands in player.position, collision checks no
+  // longer fire and the player visually pins at 0,0,0 with no escape.
+  const safe = (next: number, prev: number): number =>
+    Number.isFinite(next) ? next : prev;
+  px = safe(px, state.position[0]);
+  py = safe(py, state.position[1]);
+  pz = safe(pz, state.position[2]);
+  vx = safe(vx, 0);
+  vy = safe(vy, 0);
+  vz = safe(vz, 0);
+  yaw = safe(yaw, state.yaw);
+
   return {
     position: [px, py, pz],
     velocity: [vx, vy, vz],
     yaw,
     pitch,
     grounded,
+    // Preserve sticky state across chained applyMovement calls (client
+    // prediction replays the input buffer one frame at a time). Without this,
+    // the second-and-later replays see `pose` undefined → casual-mode branch
+    // turns off → body snaps to camera yaw on every other frame, alternating
+    // with the lerp branch. That's the "two versions of him fighting" feel.
+    coffeeBuffUntil: state.coffeeBuffUntil,
+    pose: state.pose,
   };
 };
 

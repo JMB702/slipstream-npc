@@ -47,6 +47,15 @@ let mySpeakerName: string | null = null;
 let netSend: ((msg: ClientMessage) => void) | null = null;
 let pendingTokenResolve: ((reply: TokenReply) => void) | null = null;
 let socket: WebSocket | null = null;
+// Audio graph is a singleton across STT restarts. Browser autoplay policy
+// keeps a freshly-created AudioContext SUSPENDED unless construction happens
+// inside a user gesture. PartyKit hot-reloads and Deepgram token expiry both
+// trigger STT restarts that are NOT in a gesture window — creating a new
+// AudioContext on each restart silently produces no audio (ScriptProcessor
+// onaudioprocess only fires while running). Reusing the original context
+// (created during the initial lobby "Enter Game" click) sidesteps the
+// suspension problem. Only the WS-bound processor + source nodes are
+// rebuilt per session.
 let audioCtx: AudioContext | null = null;
 let processor: ScriptProcessorNode | null = null;
 let source: MediaStreamAudioSourceNode | null = null;
@@ -94,6 +103,9 @@ const floatTo16BitPCM = (input: Float32Array): ArrayBuffer => {
   return buf;
 };
 
+// Tear down the per-session audio graph nodes (processor + source + sink)
+// but NOT the AudioContext itself — see the audioCtx singleton comment for
+// why. The context lives for the page lifetime once it's been resumed.
 const teardownAudio = (): void => {
   if (processor) {
     try {
@@ -120,10 +132,26 @@ const teardownAudio = (): void => {
     }
     source = null;
   }
-  if (audioCtx) {
-    void audioCtx.close().catch(() => {});
-    audioCtx = null;
+  // audioCtx intentionally preserved across STT restarts.
+};
+
+// Lazily create or return the singleton AudioContext. resume() is fired
+// without await — Web Audio's resume() promise can stay pending forever
+// when called outside the autoplay-policy gesture window, and awaiting it
+// hangs the entire STT init. Chrome auto-resumes the context on the next
+// user gesture anyway; we just need a context that EXISTS so the WS can
+// open. Suspended contexts produce zero-amplitude buffers (no audio sent)
+// until they resume, which is the right fallback.
+const getOrCreateAudioCtx = (): AudioContext => {
+  if (!audioCtx || audioCtx.state === 'closed') {
+    audioCtx = new AudioContext();
   }
+  if (audioCtx.state === 'suspended') {
+    void audioCtx.resume().catch((err) => {
+      console.warn('[stt] AudioContext.resume() failed:', err);
+    });
+  }
+  return audioCtx;
 };
 
 const closeSocket = (reason: string): void => {
@@ -143,6 +171,7 @@ const closeSocket = (reason: string): void => {
 
 const openSocket = async (): Promise<void> => {
   if (stopped) return;
+  console.log('[stt] openSocket: requesting token');
   const reply = await requestToken();
   if (stopped) return;
   if (!reply.token) {
@@ -155,11 +184,15 @@ const openSocket = async (): Promise<void> => {
     }, 5000);
     return;
   }
+  console.log(`[stt] got token (len=${reply.token.length} ttl=${reply.expiresInS ?? 0}s)`);
 
   // Native AudioContext sample rate. Browsers commonly default to 48000 Hz
-  // (sometimes 44100). Either is fine for Deepgram if we report it.
-  audioCtx = new AudioContext();
-  const sampleRate = audioCtx.sampleRate;
+  // (sometimes 44100). Either is fine for Deepgram if we report it. The
+  // context is a singleton — see audioCtx declaration — so this only
+  // constructs on the very first STT start; subsequent restarts reuse it
+  // and just call resume() to handle suspension after tab visibility loss.
+  const ctx = getOrCreateAudioCtx();
+  const sampleRate = ctx.sampleRate;
 
   const params = new URLSearchParams({
     model: 'nova-2',
@@ -178,57 +211,95 @@ const openSocket = async (): Promise<void> => {
     // stopped, time to pick an NPC."
     utterance_end_ms: '1000',
   });
+  console.log(`[stt] opening Deepgram WS (sampleRate=${sampleRate}, ctx.state=${ctx.state})`);
   const ws = new WebSocket(`${DG_URL}?${params.toString()}`, ['token', reply.token]);
   ws.binaryType = 'arraybuffer';
   socket = ws;
 
   ws.onopen = async () => {
+    console.log('[stt] Deepgram WS open');
     if (stopped) {
       closeSocket('stopped-while-opening');
       return;
     }
     try {
       const stream = await getMicStream();
-      if (!audioCtx) return;
-      source = audioCtx.createMediaStreamSource(stream);
+      const tracks = stream.getAudioTracks();
+      const trackInfo = tracks.map((t) => `enabled=${t.enabled} muted=${t.muted} state=${t.readyState}`).join(', ');
+      console.log(`[stt] mic stream acquired: ${tracks.length} track(s) [${trackInfo}]`);
+      // Re-check the singleton context; if a teardown happened between the
+      // top of openSocket and onopen firing, we want the current one.
+      const liveCtx = getOrCreateAudioCtx();
+      console.log(`[stt] AudioContext state at wire-up: ${liveCtx.state}`);
+      source = liveCtx.createMediaStreamSource(stream);
       // ScriptProcessor's bufferSize controls chunk granularity; 2048 at
       // 48kHz ≈ 43ms per chunk, which is well under Deepgram's 100ms
       // recommended max. Deprecated but universally supported; AudioWorklet
       // is the replacement when latency or worker isolation matters.
-      processor = audioCtx.createScriptProcessor(2048, 1, 1);
+      processor = liveCtx.createScriptProcessor(2048, 1, 1);
       // Sink gain at 0 so the processor's silent output doesn't leak out
       // the speakers — connecting to destination is still required for the
       // process callback to fire.
-      sinkGain = audioCtx.createGain();
+      sinkGain = liveCtx.createGain();
       sinkGain.gain.value = 0;
       source.connect(processor);
       processor.connect(sinkGain);
-      sinkGain.connect(audioCtx.destination);
+      sinkGain.connect(liveCtx.destination);
 
+      let processFires = 0;
+      let nonSilentFires = 0;
+      let bytesSent = 0;
       processor.onaudioprocess = (ev) => {
         if (!socket || socket.readyState !== WebSocket.OPEN) return;
         const channelData = ev.inputBuffer.getChannelData(0);
+        processFires++;
+        // Quick non-silence check — peak amplitude over the buffer.
+        let peak = 0;
+        for (let i = 0; i < channelData.length; i++) {
+          const a = Math.abs(channelData[i]!);
+          if (a > peak) peak = a;
+        }
+        if (peak > 0.01) nonSilentFires++;
         const pcm = floatTo16BitPCM(channelData);
         socket.send(pcm);
+        bytesSent += pcm.byteLength;
+        // Log every ~2s (≈47 fires at 2048/48kHz). Reveals whether the
+        // processor is firing at all and whether mic audio is non-silent.
+        if (processFires % 47 === 0) {
+          console.log(
+            `[stt] audio: ${processFires} fires, ${nonSilentFires} non-silent, ${(bytesSent / 1024).toFixed(1)}KB sent`,
+          );
+        }
       };
+      console.log('[stt] audio graph wired; awaiting onaudioprocess fires');
     } catch (err) {
       console.warn('[stt] mic wire-up failed:', err);
       closeSocket('wire-up-failed');
     }
   };
 
+  let dgMessageCount = 0;
   ws.onmessage = (ev) => {
+    dgMessageCount++;
     let data: DeepgramResult;
     try {
       data = JSON.parse(typeof ev.data === 'string' ? ev.data : '') as DeepgramResult;
     } catch {
+      console.warn(`[stt] non-JSON Deepgram message #${dgMessageCount}`);
       return;
+    }
+    if (dgMessageCount <= 3 || dgMessageCount % 20 === 0) {
+      console.log(`[stt] Deepgram msg #${dgMessageCount} type=${data.type} is_final=${data.is_final}`);
     }
     if (data.type === 'Results' || (data.channel && data.is_final !== undefined)) {
       const text = data.channel?.alternatives?.[0]?.transcript ?? '';
       if (!text.trim()) return;
       const isFinal = data.is_final === true;
-      if (!isFinal) return; // Phase 2: only finals reach the server.
+      if (!isFinal) {
+        console.log(`[stt] interim: "${text}"`);
+        return; // Phase 2: only finals reach the server.
+      }
+      console.log(`[stt] FINAL transcript → server: "${text}"`);
       const now = Date.now();
       netSend?.({
         type: 'transcript',

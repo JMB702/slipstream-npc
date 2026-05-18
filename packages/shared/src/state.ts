@@ -2,12 +2,16 @@ export type PlayerId = string;
 
 export type Vec3 = readonly [number, number, number];
 
-export type CharacterId = 'soldier' | 'ch15' | 'ch35' | 'eve' | 'maria' | 'medea' | 'dreyar';
+export type CharacterId = 'soldier' | 'ch15' | 'ch35' | 'eve' | 'maria' | 'medea' | 'dreyar' | 'rob';
 
 // Steady-state pose. null = default combat-ready stance (the existing locomotion +
 // rifle aim state machine runs unaffected). Anything else makes the client play
 // that pose's looping clip instead of locomotion.
-export type Pose = 'casual_idle' | 'lean_wall' | 'sit' | 'lay' | 'dance' | null;
+//   fight_idle — Rob-only stance (characterId === 'rob' gate enforced server-side
+//   on both the /tools/set_pose webhook and the human-player debug key path).
+//   Auto-clears back to casual_idle after POSE.fightIdleMs so it doesn't lock
+//   the patrol bot in place.
+export type Pose = 'casual_idle' | 'lean_wall' | 'sit' | 'lay' | 'dance' | 'fight_idle' | null;
 
 // One-shot transition between poses. While non-null the client plays the
 // matching transition clip; the server flips it back to null after the
@@ -28,6 +32,10 @@ export interface PlayerState {
   reloading: boolean;
   reloadDoneAt: number | null;
   vaulting: boolean;
+  // Casual-mode smoking emote. True while the Smoke clip should play on the
+  // client. Server only sets it for players with pose === 'casual_idle';
+  // movement / fire / reload / jump / pose-change cancel it.
+  smoking: boolean;
   kills: number;
   deaths: number;
   lastSeenSeq: number;

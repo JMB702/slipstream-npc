@@ -10,11 +10,22 @@ export interface InputFrame {
   sprint: boolean;
   fire: boolean;
   reload: boolean;
+  // Casual-mode smoking emote toggle. Held while the smoke button (B / D-pad
+  // down) is down. Server gates the actual `smoking` state on pose === 'casual_idle'
+  // and stationary input — see applyInput.
+  smoke: boolean;
   // Rising-edge "use the thing in front of me" press. Server checks proximity
   // to interactable props (currently just the coffee maker on fps_shooter).
   interact: boolean;
   yaw: number;
   pitch: number;
+  // Camera direction in world space. Distinct from `yaw` in casual mode (the
+  // RDR2-style free-orbit camera) — the body yaw lerps toward the velocity
+  // direction while the camera continues to orbit independently. In combat
+  // mode the two are equal (mouse drives both body and camera). Server uses
+  // cameraYaw to rotate forward/right into world-space velocity when the
+  // player is in casual_idle; otherwise it uses yaw.
+  cameraYaw: number;
   // Camera-resolved aim. Sent on every frame, but it's the per-fire-input
   // aim that matters: the server fires from `aimOrigin` toward `aim`, NOT
   // from the player's eye along yaw/pitch. Avoids the third-person camera-

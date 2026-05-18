@@ -24,6 +24,10 @@ const CHARACTERS = [
   // _blender_bake.py:import_character. Output is Dreyar.baked.glb; rename
   // to Dreyar.glb after baking. Used by NPC `guts` per npc-roster.ts.
   { name: 'Dreyar', source: path.join(ROOT, '3D Assets/Characters/Guts - Dreyar By M.Aure.fbx') },
+  // Rob — Meshy-AI-generated mesh, auto-rigged on Mixamo (5/18). Raw FBX
+  // source — same path as Dreyar. Used by NPC `rob` AND by any player whose
+  // username is "Rob" (server-side override in onConnect).
+  { name: 'Rob', source: path.join(ROOT, '3D Assets/Characters/Rob-Meshy_AI_0518184613_texture.fbx') },
 ];
 
 // Clips that need root-motion stripped at bake time (locomotion). Matches the

@@ -44,6 +44,8 @@ export const setPose = (
   player.poseTransition = transition;
   player.danceVariant = Math.max(0, Math.floor(danceVariant)) % POSE.danceVariants;
   player.poseStartedAt = now;
+  // Smoke emote is locked to pose === 'casual_idle'; clear it on any other pose.
+  if (pose !== 'casual_idle') player.smoking = false;
   if (transition !== null) {
     player.velocity = [0, 0, 0];
   }
@@ -56,6 +58,8 @@ export const clearPose = (player: ServerPlayer): void => {
   player.poseTransition = null;
   player.danceVariant = 0;
   player.poseStartedAt = undefined;
+  // Combat overrides social — drop the smoke emote on pose clear too.
+  player.smoking = false;
 };
 
 // Advance pose-transition timers. Called once per tick from runTick.
@@ -72,6 +76,17 @@ export const advancePoseTransition = (player: ServerPlayer, now: number): void =
   }
   player.poseTransition = null;
   player.poseStartedAt = now;
+};
+
+// Auto-expire poses that aren't meant to persist. fight_idle is the only one
+// today — it's a brief defensive stance, not a held social pose like sit/lay.
+// Without this the bot would freeze in fight_idle until something else moved
+// the pose. After expiry the player returns to casual_idle (the spawn default).
+export const tickPoseTimeout = (player: ServerPlayer, now: number): void => {
+  if (player.pose !== 'fight_idle') return;
+  const startedAt = player.poseStartedAt ?? now;
+  if (now - startedAt < POSE.fightIdleMs) return;
+  setPose(player, 'casual_idle', null, 0, now);
 };
 
 // Voice-agent-facing API: pick the right transition for a target pose so the
@@ -100,7 +115,8 @@ export const applyAgentPose = (
     setPose(player, 'lay', 'lay_down', 0, now);
     return;
   }
-  // casual_idle, lean_wall, dance — no transition (the destination loop just starts).
+  // casual_idle, lean_wall, dance, fight_idle — no transition (the destination
+  // loop just starts). fight_idle is auto-expired by tickPoseTimeout.
   setPose(player, target, null, danceVariant, now);
 };
 
@@ -184,6 +200,35 @@ export const applyInput = (player: ServerPlayer, input: InputFrame, now: number)
   if (input.reload && !player.reloading && player.ammo < WEAPON.magazineSize) {
     player.reloading = true;
     player.reloadDoneAt = now + WEAPON.reloadMs;
+  }
+
+  // Casual-mode smoking emote. Gated to:
+  //   - pose === 'casual_idle' (can't smoke with rifle drawn)
+  //   - characterId === 'rob' (only Rob's avatar has the Smoke animation
+  //     baked + only Rob's NPC has the persona for it — per the design)
+  //   - stationary stick required to start (movement cancels)
+  //   - no concurrent combat actions
+  const moving =
+    Math.abs(input.forward) > 0.1 || Math.abs(input.right) > 0.1;
+  const wantsSmoke =
+    input.smoke &&
+    player.characterId === 'rob' &&
+    player.pose === 'casual_idle' &&
+    !player.reloading &&
+    !input.fire &&
+    !input.jump;
+  if (wantsSmoke && !player.smoking && !moving) {
+    player.smoking = true;
+  }
+  if (
+    player.smoking &&
+    (moving ||
+      input.fire ||
+      input.reload ||
+      input.jump ||
+      player.pose !== 'casual_idle')
+  ) {
+    player.smoking = false;
   }
 };
 
@@ -334,9 +379,11 @@ export const integrateIdle = (player: ServerPlayer, now: number): void => {
     sprint: false,
     fire: false,
     reload: false,
+    smoke: false,
     interact: false,
     yaw: player.yaw,
     pitch: player.pitch,
+    cameraYaw: player.yaw,
     aimOrigin: null,
     aim: null,
   };

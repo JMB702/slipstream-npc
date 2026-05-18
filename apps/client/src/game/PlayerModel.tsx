@@ -1,14 +1,8 @@
 import { Billboard, Text } from '@react-three/drei';
-import { useFrame } from '@react-three/fiber';
-import { Suspense, useState } from 'react';
+import { Suspense } from 'react';
 import { PLAYER, type CharacterId, type PlayerId, type Pose, type PoseTransition, type Vec3 } from '@slipstream-npc/shared';
 import { Character } from './Character.js';
-import { getLastAimedAt } from './aim-state.js';
 import { useGame } from '../store.js';
-
-// How long an enemy's nameplate stays visible after the local reticle leaves
-// them. Matches the spec: tag on aim, fade out after a 3s grace.
-const NAME_REVEAL_HOLD_MS = 3000;
 
 interface Props {
   name: string;
@@ -18,6 +12,7 @@ interface Props {
   yaw: number;
   reloading: boolean;
   vaulting: boolean;
+  smoking?: boolean;
   playerId: PlayerId | null;
   isBot?: boolean;
   isFriend?: boolean;
@@ -59,6 +54,7 @@ export const PlayerModel = ({
   yaw,
   reloading,
   vaulting,
+  smoking,
   playerId,
   isBot,
   isFriend,
@@ -79,6 +75,7 @@ export const PlayerModel = ({
           yaw={yaw}
           reloading={reloading}
           vaulting={vaulting}
+          smoking={smoking ?? false}
           alive={alive}
           playerId={playerId}
           characterId={characterId}
@@ -121,22 +118,19 @@ const VoiceGlyph = ({ kind }: { kind: 'mic' | 'speaker' }) => {
   );
 };
 
+// Persistent name label above every NPC and other player. Was originally
+// "aim at them for 3s to reveal" — kept the same component name during
+// the switch to always-on so the diff stays small. PlayerModel already
+// gates this off the local player via `showsName = ... && !isSelf`, so
+// the player never sees their own name floating in front of their face.
 const EnemyNameLabel = ({
   name,
   isFriend,
-  playerId,
 }: {
   name: string;
   isFriend: boolean;
   playerId: PlayerId;
 }) => {
-  const [visible, setVisible] = useState(false);
-  useFrame(() => {
-    const last = getLastAimedAt(playerId);
-    const should = last > 0 && performance.now() - last < NAME_REVEAL_HOLD_MS;
-    if (should !== visible) setVisible(should);
-  });
-  if (!visible) return null;
   const color = isFriend ? '#5fff8f' : 'white';
   return (
     <Text fontSize={0.14} color={color} outlineWidth={0.012} outlineColor="black">

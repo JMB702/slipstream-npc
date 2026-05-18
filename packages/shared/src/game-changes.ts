@@ -74,4 +74,28 @@ export const GAME_CHANGES: readonly GameChange[] = [
     evidence:
       'See the multi-speaker voice redesign — orchestrator + arbitration in apps/party/src/voice/.',
   },
+  {
+    id: '2026-05-18-rob-joined',
+    at: Date.parse('2026-05-18T00:00:00Z'),
+    // Scoped to everyone EXCEPT Rob — he doesn't need to be told he exists.
+    scope: ['mira', 'guts', 'fennel', 'rook', 'vex', 'jacqueline'],
+    summary:
+      "A new soldier named Rob has joined the arena. He's another NPC, recently arrived. You haven't spent much time with him yet, but you know he's around — quiet, smokes when he's idle. He may show up in conversation; reference him naturally if it fits, otherwise don't bring him up unprompted.",
+    evidence:
+      'See NPCS roster entry for rob in packages/shared/src/npc-roster.ts.',
+  },
+  {
+    // Supersedes 2026-05-18-rob-joined. The original entry described Rob as a
+    // quiet smoker — placeholder persona, written before his real personality
+    // was filled in. This delta corrects the picture for every other NPC.
+    // Bumped id (not edited in place) because the dedup contract says edits
+    // to a seeded id don't re-fire — and the original already shipped.
+    id: '2026-05-18-rob-joined-v2',
+    at: Date.parse('2026-05-18T12:00:00Z'),
+    scope: ['mira', 'guts', 'fennel', 'rook', 'vex', 'jacqueline'],
+    summary:
+      "What you actually know about Rob, now that you've watched him a bit: he's a martial arts instructor who runs his own dojo, wears a headband basically always, and won't shut up about livestreaming, AI tech, ancient civilizations, and whether the pyramids were built by who they say. He smokes medical marijuana between patrols — it's his thing, helps his back. Energetic, friendly, talks a lot but lands his points. The earlier read on him as 'quiet' was wrong; you weren't paying attention. Reference him naturally if it fits the moment; otherwise don't bring him up unprompted.",
+    evidence:
+      'See NPCS roster entry for rob in packages/shared/src/npc-roster.ts.',
+  },
 ];
