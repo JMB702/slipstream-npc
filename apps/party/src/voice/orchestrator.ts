@@ -98,6 +98,12 @@ interface ActiveTurn {
   // mention another NPC by name) and to feed the recent-self-turns
   // history once the turn completes.
   textBuf: string;
+  // Wall-clock at which the orchestrator should finalize the turn
+  // (release the turn-state machine to IDLE / chain). 0 = not yet
+  // scheduled; the audio loop sets this when it sends the final chunk.
+  // Polled by tick() — see the same-pattern note on transcriptArbDeadline.
+  finalizeAt: number;
+  chainEligible: boolean;
 }
 
 export class VoiceOrchestrator {
@@ -111,9 +117,15 @@ export class VoiceOrchestrator {
   private recentSelfTurns = new Map<string, RecentNpcTurn[]>();
   private active: ActiveTurn | null = null;
   private nextUtteranceCounter = 0;
-  // Pending transcript-driven arbitration timer. Reset on every new scene
-  // transcript so a chain of partials/finals coalesce into one turn.
-  private transcriptArbTimer: ReturnType<typeof setTimeout> | null = null;
+  // Wall-clock deadline at which the transcript-driven arbitration should
+  // fire. Set on every new scene transcript (resetting the hold so a
+  // chain of partials/finals coalesces into one turn). 0 = nothing
+  // pending. The server's runTick loop polls this every TICK_MS and
+  // triggers arbitration when Date.now() >= the deadline — we used to
+  // use setTimeout, but Cloudflare Durable Objects don't reliably fire
+  // deferred timers between request handlers, so we drive this off the
+  // existing setInterval-based tick that always survives.
+  private transcriptArbDeadline = 0;
 
   constructor(ctx: OrchestratorContext) {
     this.ctx = ctx;
@@ -161,20 +173,35 @@ export class VoiceOrchestrator {
     }
 
     // Transcript-driven arbitration: schedule an arbitration pass after a
-    // short hold so multiple consecutive finals coalesce. The VAD-driven
-    // path in turn-state still runs in parallel; whichever fires first
-    // wins (and the other becomes a no-op because the turn-state moves
-    // out of HUMAN_SPEAKING/IDLE on the first fire). When the latest line
-    // looks unterminated ("we should ask" — no period), wait longer for
-    // the rest of the sentence to arrive so the name in the second half
-    // doesn't miss the arbitration window.
-    if (this.transcriptArbTimer !== null) clearTimeout(this.transcriptArbTimer);
+    // short hold so multiple consecutive finals coalesce. Each new line
+    // pushes the deadline out — the actual fire happens in `tick()`
+    // which the server's runTick loop calls every TICK_MS. When the
+    // latest line looks unterminated ("we should ask" — no period), wait
+    // longer for the rest of the sentence to arrive so the name in the
+    // second half doesn't miss the arbitration window.
     const looksIncomplete = !/[.!?]\s*$/.test(line.text);
     const hold = looksIncomplete ? TRANSCRIPT_ARB_HOLD_INCOMPLETE_MS : TRANSCRIPT_ARB_HOLD_MS;
-    this.transcriptArbTimer = setTimeout(() => {
-      this.transcriptArbTimer = null;
+    this.transcriptArbDeadline = Date.now() + hold;
+  }
+
+  // Called every TICK_MS from the server's runTick loop. The whole point
+  // of routing through the tick loop (vs. setTimeout) is that
+  // setInterval-based timers survive Cloudflare DO request boundaries
+  // while standalone setTimeouts often do not. This is the prod-safe
+  // way to schedule deferred work in a Durable Object.
+  tick(): void {
+    const now = Date.now();
+    // Finalize a turn whose TTS finished but whose audio is still
+    // playing on the clients. Releases the turn-state to IDLE/chain.
+    if (this.active && this.active.finalizeAt > 0 && now >= this.active.finalizeAt) {
+      const { npcId, utteranceId, chainEligible } = this.active;
+      this.finishTurn(npcId, utteranceId, chainEligible);
+    }
+    // Run arbitration once the transcript-coalesce hold expires.
+    if (this.transcriptArbDeadline > 0 && now >= this.transcriptArbDeadline) {
+      this.transcriptArbDeadline = 0;
       this.tryTranscriptDrivenArbitration();
-    }, hold);
+    }
   }
 
   // Trigger an arbitration pass purely on the basis of a finalized scene
@@ -200,10 +227,7 @@ export class VoiceOrchestrator {
 
   dispose(): void {
     this.cancelActive('dispose');
-    if (this.transcriptArbTimer !== null) {
-      clearTimeout(this.transcriptArbTimer);
-      this.transcriptArbTimer = null;
-    }
+    this.transcriptArbDeadline = 0;
     this.turn.dispose();
   }
 
@@ -260,7 +284,7 @@ export class VoiceOrchestrator {
   private startNpcTurn(npcId: string): string {
     const utteranceId = `u-${Date.now()}-${this.nextUtteranceCounter++}`;
     const abort = new AbortController();
-    this.active = { npcId, utteranceId, abort, textBuf: '' };
+    this.active = { npcId, utteranceId, abort, textBuf: '', finalizeAt: 0, chainEligible: false };
     // Snapshot the scene speech now and clear the buffer so the next
     // turn starts fresh. We intentionally don't include this NPC's own
     // upcoming response in the next arbitration window — it shows up
@@ -463,16 +487,17 @@ export class VoiceOrchestrator {
       // playing the queue. If we transition out of npc_speaking now,
       // arbitration will fire on the next transcript and a second NPC will
       // start talking over the still-audible first. Hold the turn-state
-      // for an estimated playback duration — TTS at ~150 wpm ≈ 65ms per
-      // character, plus a small grace. This gives a clean turn ordering
-      // until we wire a real "client playback ended" signal.
+      // for an estimated playback duration. setTimeout doesn't survive
+      // DO request boundaries in prod, so stamp a deadline that tick()
+      // polls every TICK_MS.
       const estimatedPlaybackMs =
         Math.max(800, fullText.length * 65) + 300;
       const elapsedMs = Date.now() - startedAt;
       const remainingMs = Math.max(0, estimatedPlaybackMs - elapsedMs);
-      setTimeout(() => {
-        this.finishTurn(npcId, utteranceId, chainEligible);
-      }, remainingMs);
+      if (this.active && this.active.utteranceId === utteranceId) {
+        this.active.chainEligible = chainEligible;
+        this.active.finalizeAt = Date.now() + remainingMs;
+      }
     } catch (err) {
       if (signal.aborted) return;
       console.warn(`[orchestrator] npc turn ${npcId} failed:`, err);

@@ -1645,6 +1645,13 @@ export default class SlipstreamServer implements Party.Server {
   }
 
   private runTick(): void {
+    // Drive the voice orchestrator's deferred work (transcript-arb hold,
+    // NPC turn finalize) off this setInterval-based tick. Standalone
+    // setTimeouts inside DO request handlers don't reliably fire in
+    // Cloudflare prod once the request returns; setInterval timers
+    // anchored in onStart survive. See CLAUDE.md gotcha #11 for the
+    // sibling rule about room.env.
+    this.voice.tick();
     const now = this.serverTime();
     const all = Array.from(this.players.values());
 
