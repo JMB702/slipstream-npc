@@ -1740,9 +1740,15 @@ export default class SlipstreamServer implements Party.Server {
     if (this.winnerId === null) {
       const profile =
         BOT_PROFILES[this.botDifficulty] ?? BOT_PROFILES[MATCH.defaultBotDifficulty];
+      // In single-NPC rooms the ConvAI session is open the whole time the
+      // player is in the lobby, which would freeze the lone NPC permanently
+      // under the controller's default conversation-freeze rule. Skip the
+      // freeze so the NPC keeps patrolling; the player's audio is delivered
+      // via ConvAI's WebRTC channel, not by NPC facing direction.
+      const freezeWhenConversing = !this.isSingleNpcRoom();
       for (const p of all) {
         if (!p.isBot) continue;
-        const fired = tickBot(p, all, now, profile);
+        const fired = tickBot(p, all, now, profile, freezeWhenConversing);
         // Bots have no camera; null payload routes server through the
         // eye-from-yaw/pitch fallback in tryFire.
         if (fired) this.pendingFire.set(p.id, null);
