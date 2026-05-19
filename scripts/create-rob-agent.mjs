@@ -16,8 +16,11 @@
 // you can paste it into npc-roster.ts.
 //
 // Usage:
-//   node scripts/create-rob-agent.mjs               # live create
-//   node scripts/create-rob-agent.mjs --dry-run     # show planned body without POSTing
+//   node scripts/create-rob-agent.mjs                   # live create
+//   node scripts/create-rob-agent.mjs --dry-run         # show planned body without POSTing
+//   node scripts/create-rob-agent.mjs --patch           # PATCH existing agent's prompt + greetings
+//                                                       # to match ROB_PERSONA / ROB_GREETINGS here
+//   node scripts/create-rob-agent.mjs --patch --dry-run # show planned PATCH body without sending
 
 import { readFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
@@ -79,6 +82,16 @@ async function elPost(path, body, key) {
   return r.json();
 }
 
+async function elPatch(path, body, key) {
+  const r = await fetch(`${API}${path}`, {
+    method: 'PATCH',
+    headers: { 'xi-api-key': key, 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(`PATCH ${path} → ${r.status} ${await r.text()}`);
+  return r.json();
+}
+
 function buildRobBody(templateAgent) {
   // Strip ids and timestamps that don't belong on a create payload. The
   // ElevenLabs create endpoint complains if you POST back fields like
@@ -119,9 +132,61 @@ function buildRobBody(templateAgent) {
   return body;
 }
 
+// PATCH the existing Rob agent's prompt + greetings to match the current
+// ROB_PERSONA / ROB_GREETINGS values in this file. Use when the live agent
+// has stale persona text (e.g. the placeholder seed from the original
+// create run). Tool_ids stay on the agent; we only overlay the prompt
+// fields. The PATCH endpoint rejects sending both `tools` and `tool_ids`
+// per the same gotcha as the create path, so we keep the body minimal.
+async function patchExisting(key, dryRun) {
+  const list = await elGet('/v1/convai/agents?page_size=100', key);
+  const existing = (list.agents ?? []).find((a) => a.name === NEW_AGENT_NAME);
+  if (!existing) {
+    console.error(`No agent named "${NEW_AGENT_NAME}" found. Run without --patch to create one first.`);
+    console.error('Visible agents:');
+    for (const a of list.agents ?? []) console.error(`  - ${a.name} (${a.agent_id})`);
+    process.exit(1);
+  }
+  console.log(`Patching ${existing.name} (${existing.agent_id})`);
+
+  // Patch only the fields we care about — leave voice_id, tools, KB
+  // attachments, etc. untouched so manual dashboard tweaks survive.
+  const body = {
+    conversation_config: {
+      agent: {
+        prompt: {
+          prompt: ROB_PERSONA,
+        },
+        first_message: ROB_GREETINGS[0],
+        first_message_pool: ROB_GREETINGS.slice(),
+      },
+    },
+  };
+
+  if (dryRun) {
+    console.log('\n--- planned PATCH body ---');
+    const preview = JSON.parse(JSON.stringify(body));
+    preview.conversation_config.agent.prompt.prompt =
+      preview.conversation_config.agent.prompt.prompt.slice(0, 200) + '…';
+    console.log(JSON.stringify(preview, null, 2));
+    console.log('\n(dry-run — no PATCH sent)');
+    return;
+  }
+
+  await elPatch(`/v1/convai/agents/${existing.agent_id}`, body, key);
+  console.log(`\n✓ Patched: ${existing.agent_id}`);
+}
+
 async function main() {
   const dryRun = process.argv.includes('--dry-run');
+  const patchMode = process.argv.includes('--patch');
   const key = await loadApiKey();
+
+  if (patchMode) {
+    console.log(`Plan: PATCH existing "${NEW_AGENT_NAME}"  dry-run=${dryRun}\n`);
+    await patchExisting(key, dryRun);
+    return;
+  }
 
   console.log(`Plan: clone "${TEMPLATE_AGENT_NAME_PREFIX}" → "${NEW_AGENT_NAME}"  dry-run=${dryRun}\n`);
 
@@ -146,6 +211,7 @@ async function main() {
     console.log(`\nRob already exists: ${existingRob.agent_id}`);
     console.log('No-op. Paste this into packages/shared/src/npc-roster.ts:\n');
     console.log(`    agentId: '${existingRob.agent_id}',`);
+    console.log('\nTo update its persona to match this script, re-run with --patch.');
     return;
   }
 

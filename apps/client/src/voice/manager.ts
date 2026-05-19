@@ -20,11 +20,18 @@ interface PendingContext {
 interface VoiceManagerDeps {
   send: (msg: ClientMessage) => void;
   myName: string;
+  // Lobby-selected NPC ids. When exactly one, the manager treats that
+  // NPC as ConvAI-eligible regardless of its NpcDef.useDecoupledStack
+  // flag — see startSession early-bail. Server makes the matching
+  // decision via isSingleNpcRoom() so both ends agree without an
+  // extra wire-protocol field.
+  npcIds: string[];
 }
 
 let deps: VoiceManagerDeps | null = null;
 let active: ConvAISession | null = null;
 let starting = false;
+let singleNpcMode = false;
 const pendingContext = new Map<string, PendingContext>();
 let muteUnsub: (() => void) | null = null;
 let lastSelfPos: Vec3 | null = null;
@@ -36,6 +43,7 @@ const VOLUME_POLL_MS = 100;
 
 export const installVoiceManager = (d: VoiceManagerDeps): void => {
   deps = d;
+  singleNpcMode = d.npcIds.length === 1;
   if (!muteUnsub) {
     muteUnsub = onMuteChange((m) => {
       active?.setMuted(m);
@@ -197,7 +205,13 @@ const startSession = async (npcId: string): Promise<void> => {
   // server-orchestrated turn-state machine. Proximity still matters for
   // arbitration (NPC must be in the room for the player to address her),
   // but no per-player ConvAI session is opened.
-  if (npc.useDecoupledStack) return;
+  //
+  // SINGLE-NPC OVERRIDE: when the lobby spawned exactly one NPC, route
+  // that NPC through ConvAI regardless of the static flag — the server's
+  // handleVoiceSessionStart has the matching override so it'll actually
+  // mint context for us. ConvAI handles its own STT+LLM+TTS in one
+  // provider with no orchestration layer between them.
+  if (npc.useDecoupledStack && !singleNpcMode) return;
   starting = true;
   const sessionId = `s_${Math.random().toString(36).slice(2, 10)}`;
   try {

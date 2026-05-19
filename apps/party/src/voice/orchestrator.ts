@@ -539,7 +539,7 @@ export class VoiceOrchestrator {
           npcId,
           utteranceId,
           chunkIdx: chunkIdx++,
-          mime: 'audio/mpeg',
+          mime: 'audio/pcm;rate=24000',
           b64: audio.audioB64,
           isFinal: false,
         });

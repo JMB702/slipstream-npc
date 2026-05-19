@@ -96,7 +96,7 @@ export const App = () => {
     setActiveMap(mapId);
     useGame.getState().setActiveMapId(mapId);
     const c = connect(mapId, name, killTarget, accessCode, botCount, botDifficulty, npcIds);
-    installVoiceManager({ send: c.send, myName: name });
+    installVoiceManager({ send: c.send, myName: name, npcIds });
     setClient(c);
     setName(name);
   };
