@@ -117,6 +117,15 @@ export const tickBot = (
   others: readonly ServerPlayer[],
   now: number,
   profile: BotProfile,
+  // When true (default), an active ConvAI session pins the bot in place and
+  // faces the player ("walk up to talk" UX). In single-NPC rooms the session
+  // is always open while the player is in the lobby, so the freeze would
+  // pin the NPC forever — patrol stops, coffee runs only fire during the
+  // brief coffeeBound override, the player sees a statue who smokes. The
+  // server passes `false` here when isSingleNpcRoom() so the lone NPC keeps
+  // patrolling like normal. The player's ConvAI WebRTC audio doesn't need
+  // the NPC to face them; it routes by session id, not by spatial proximity.
+  freezeWhenConversing: boolean = true,
 ): boolean => {
   if (!bot.alive) {
     bot.botState = 'dead';
@@ -390,7 +399,10 @@ export const tickBot = (
   // or fleeing or coffee-bound (those tools are themselves conversation
   // outputs), the NPC freezes and faces the player. Movement tools
   // override the freeze because the conversation just asked the NPC to MOVE.
+  // freezeWhenConversing=false (single-NPC rooms) skips the freeze entirely
+  // so the lone NPC keeps patrolling while the always-on ConvAI session runs.
   const conversingWith =
+    freezeWhenConversing &&
     bot.botConversationWith &&
     bot.botState !== 'engage' &&
     !followTarget &&
