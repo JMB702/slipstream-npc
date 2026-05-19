@@ -59,9 +59,17 @@ const shouldFlushAfter = (delta: string): boolean =>
 export async function* streamTts(
   opts: TtsCallOptions,
 ): AsyncGenerator<TtsAudioChunk, void, void> {
+  // PCM not MP3. MP3 is a stateful frame-based format — ElevenLabs's
+  // streaming-input WS splits payloads at arbitrary byte boundaries, not
+  // MP3 frame boundaries, so each chunk handed to the browser's
+  // decodeAudioData() fails intermittently and the gaps are audible as
+  // skipped syllables on longer responses. PCM has no frame boundaries:
+  // every chunk is independently decodable, just concatenate them.
+  // 24kHz 16-bit mono is ~48KB/s, fine for game voice. Keep this format
+  // in sync with NPC_AUDIO_SAMPLE_RATE in npc-audio-playback.ts.
   const url =
     `wss://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(opts.voiceId)}` +
-    `/stream-input?model_id=${encodeURIComponent(opts.modelId)}&output_format=mp3_44100_128`;
+    `/stream-input?model_id=${encodeURIComponent(opts.modelId)}&output_format=pcm_24000`;
 
   // ElevenLabs streaming WS doesn't authenticate via subprotocol — the
   // xi_api_key MUST be in the first JSON message body. Browsers can't set

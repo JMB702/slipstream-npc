@@ -2349,7 +2349,13 @@ export default class SlipstreamServer implements Party.Server {
     // shaped npc_context that has no agentId/signedUrl — the client's
     // ConvAI manager treats that as "no session, just leave proximity UI
     // alone." Drop silently here; mesh + STT + audio playback still work.
-    if (npc.useDecoupledStack) {
+    //
+    // SINGLE-NPC OVERRIDE: when the room only has one NPC there's nothing
+    // for the orchestrator to arbitrate against, so we route that one NPC
+    // through ConvAI instead. Lower latency, no chunked-MP3 audio gaps,
+    // ConvAI's own STT replaces Deepgram for the player's side. Decision
+    // is per-session, not baked into the NpcDef.
+    if (npc.useDecoupledStack && !this.isSingleNpcRoom()) {
       return;
     }
     const agentId = this.resolveAgentId(npc);
@@ -2600,9 +2606,31 @@ export default class SlipstreamServer implements Party.Server {
   // Phase 3 orchestrator context helpers. Each returns the slice of server
   // state the VoiceOrchestrator needs for one decision or one prompt build.
 
+  // True when the lobby spawned exactly one NPC bot. Used to route the
+  // single NPC's voice through the legacy ConvAI path instead of the
+  // decoupled orchestrator — ConvAI has its own STT+LLM+TTS pipeline that
+  // streams audio over WebRTC instead of MP3 chunks over PartyKit, which
+  // sidesteps the chunk-decode-fail audio gaps in the decoupled stack and
+  // halves end-to-end latency (one provider, not three). Multi-NPC rooms
+  // still need the orchestrator for cross-NPC arbitration; this only fires
+  // when there's no one to arbitrate against.
+  private isSingleNpcRoom(): boolean {
+    let count = 0;
+    for (const p of this.players.values()) {
+      if (p.isBot && p.npcId) {
+        count++;
+        if (count > 1) return false;
+      }
+    }
+    return count === 1;
+  }
+
   // Bots whose NpcDef has useDecoupledStack=true, returned in ArbCandidate
   // shape so the arbitration scoring function can consume them directly.
+  // In single-NPC rooms the lone NPC routes through ConvAI instead, so we
+  // return empty to disable the orchestrator's arbitration entirely.
   private decoupledArbCandidates(): ArbCandidate[] {
+    if (this.isSingleNpcRoom()) return [];
     const out: ArbCandidate[] = [];
     for (const p of this.players.values()) {
       if (!p.isBot || !p.npcId) continue;

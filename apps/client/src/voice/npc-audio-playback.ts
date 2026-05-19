@@ -1,9 +1,12 @@
 import type { Vec3 } from '@slipstream-npc/shared';
 
-// Phase 3 NPC audio playback. The server streams MP3 chunks per NPC
-// utterance over the existing PartyKit WebSocket; this module decodes
-// them with Web Audio's `decodeAudioData` and schedules them on a per-NPC
-// AudioBufferSourceNode chain so the chunks play gapless.
+// Phase 3 NPC audio playback. The server streams raw PCM chunks per NPC
+// utterance over the existing PartyKit WebSocket (16-bit signed LE mono
+// at NPC_AUDIO_SAMPLE_RATE Hz, base64-encoded); this module unpacks them
+// into AudioBuffers and schedules them on a per-NPC AudioBufferSourceNode
+// chain so the chunks play gapless. PCM not MP3 — see tts-stream.ts for
+// why; the short version is MP3 chunks aren't frame-aligned and dropped
+// decodes audibly skipped syllables on longer utterances.
 //
 // Spatial: the source chain routes through a PannerNode positioned at
 // the NPC's snapshot location. The listener pose comes from the same
@@ -70,33 +73,57 @@ const createSlot = (npcId: string): Slot => {
   return slot;
 };
 
-const decodeBase64Mp3 = async (b64: string): Promise<AudioBuffer | null> => {
-  const audioCtx = getCtx();
+// Keep in sync with the output_format query param in tts-stream.ts. PCM
+// 24kHz is what ElevenLabs sends, and it's also what the AudioBuffer is
+// constructed with — the browser resamples to the AudioContext's output
+// rate (usually 48kHz) at playback time.
+const NPC_AUDIO_SAMPLE_RATE = 24000;
+
+// Synchronous PCM unpack — base64 → bytes → Int16Array → Float32Array →
+// AudioBuffer. No async work, so the per-slot scheduling that follows
+// never races: chunks are scheduled in receive order, not decode-completion
+// order, which used to shuffle audio when decodes finished out of order.
+const decodeBase64Pcm16 = (b64: string): AudioBuffer | null => {
   try {
-    // Manual atob → Uint8Array → ArrayBuffer. atob is broadly available and
-    // doesn't require Buffer polyfills that Vite would otherwise complain
-    // about for ESM client builds.
     const binary = atob(b64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    return await audioCtx.decodeAudioData(bytes.buffer);
+    const byteLen = binary.length;
+    // 16-bit samples → 2 bytes each. An odd byte length means the chunk
+    // was truncated mid-sample, which shouldn't happen but guard anyway.
+    const sampleCount = byteLen >> 1;
+    if (sampleCount === 0) return null;
+    const int16 = new Int16Array(sampleCount);
+    for (let i = 0, b = 0; i < sampleCount; i++, b += 2) {
+      const lo = binary.charCodeAt(b);
+      const hi = binary.charCodeAt(b + 1);
+      // Little-endian, signed.
+      let s = (hi << 8) | lo;
+      if (s & 0x8000) s |= ~0xffff;
+      int16[i] = s;
+    }
+    const audioCtx = getCtx();
+    const buffer = audioCtx.createBuffer(1, sampleCount, NPC_AUDIO_SAMPLE_RATE);
+    const channel = buffer.getChannelData(0);
+    for (let i = 0; i < sampleCount; i++) channel[i] = int16[i]! / 32768;
+    return buffer;
   } catch (err) {
-    console.warn('[npc-audio] decode failed:', err);
+    console.warn('[npc-audio] PCM unpack failed:', err);
     return null;
   }
 };
 
-// Enqueue a chunk for playback. Out-of-order chunks (chunkIdx older than
-// the most recent enqueued for the same utterance) are dropped; this only
-// matters if PartyKit reorders, which it shouldn't, but the gate is cheap.
-export const enqueueNpcChunk = async (opts: {
+// Enqueue a chunk for playback. Synchronous — PCM unpack is in-line, no
+// awaits, so scheduling happens in receive order. The MP3 era of this
+// function awaited decodeAudioData, which caused chunks to be scheduled
+// in decode-completion order; on out-of-order completion the audio
+// played in the wrong order. PCM removes the await and the race with it.
+export const enqueueNpcChunk = (opts: {
   npcId: string;
   utteranceId: string;
   chunkIdx: number;
   mime: string;
   b64: string;
   isFinal: boolean;
-}): Promise<void> => {
+}): void => {
   const slot = slots.get(opts.npcId) ?? createSlot(opts.npcId);
 
   // Utterance handoff: a new utteranceId implies the previous one ended
@@ -117,11 +144,8 @@ export const enqueueNpcChunk = async (opts: {
     return;
   }
 
-  const buffer = await decodeBase64Mp3(opts.b64);
+  const buffer = decodeBase64Pcm16(opts.b64);
   if (!buffer) return;
-  // Guard against late chunks from a cancelled utterance: if the server
-  // broadcast npc_audio_stop and reset utteranceId, drop this chunk.
-  if (slot.utteranceId !== opts.utteranceId) return;
 
   const audioCtx = getCtx();
   const source = audioCtx.createBufferSource();
